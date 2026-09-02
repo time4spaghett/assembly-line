@@ -1,0 +1,20 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "assembly-line",
+      "runtimeExecutable": "C:\\Python310\\python.exe",
+      "runtimeArgs": [
+        "-m",
+        "streamlit",
+        "run",
+        "main.py",
+        "--server.headless",
+        "true",
+        "--server.port",
+        "8511"
+      ],
+      "port": 8511
+    }
+  ]
+}

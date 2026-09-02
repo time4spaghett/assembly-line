@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.env
+.streamlit/secrets.toml
+
+# Pristine pre-jitter panel: local backup, not read by the app
+data/base_panel_clean.parquet
+# Generated sample, rebuilt on demand
+data/sample_custom.csv
+
+# Unrelated research working directory — not part of the app, and this repo is
+# deployed publicly. Version it somewhere private if you want it tracked.
+research/
