@@ -88,19 +88,6 @@ st.markdown(f"""<style>
 h1 {{letter-spacing:-.02em; font-weight:700;}}
 </style>""", unsafe_allow_html=True)
 
-# TEMPORARY DIAGNOSTIC — remove once the cloud import failure is identified.
-# Streamlit Cloud redacts exception messages; this surfaces the real one.
-try:
-    import data_io  # noqa: F401
-    import tools_probe_ok  # will NameError harmlessly below if import worked
-except ImportError as _e:
-    import traceback
-    st.error("data_io import failed on this box:")
-    st.code(traceback.format_exc())
-    st.stop()
-except Exception:
-    pass  # tools_probe_ok doesn't exist — data_io imported fine
-
 TOOLS = [
     st.Page("tools/edge_concierge.py", title="Edge Concierge", default=True),
     st.Page("tools/learned_edge.py", title="Learned Edge"),
