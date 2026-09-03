@@ -19,6 +19,7 @@ import pandas as pd
 from engine import FWD_COLS
 
 BASE_PANEL = Path(__file__).parent / "data" / "base_panel.parquet"
+SHORT_PANEL = Path(__file__).parent / "data" / "short_panel.parquet"
 BENCHMARKS = Path(__file__).parent / "data" / "benchmarks.parquet"
 
 # Reference series shipped with the app (built once by benchmarks_build.py).
@@ -54,6 +55,10 @@ def reference_series(ticker: str, dates: pd.Series) -> pd.Series:
 
 def load_base_panel() -> pd.DataFrame:
     return pd.read_parquet(BASE_PANEL)
+
+
+def load_short_panel() -> pd.DataFrame:
+    return pd.read_parquet(SHORT_PANEL)
 
 
 def _fwd_from_prices(df: pd.DataFrame, price_col: str) -> pd.DataFrame:

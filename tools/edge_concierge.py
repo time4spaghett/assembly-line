@@ -22,8 +22,8 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from data_io import (REFERENCE_LABELS, AmbiguousDates, ambiguous_date,
-                     load_base_panel, load_benchmarks, normalize_csv,
-                     reference_series)
+                     load_base_panel, load_benchmarks, load_short_panel,
+                     normalize_csv, reference_series)
 from report import build_report as _build_report
 from ui import (BASELINE, BLUE, GRID, INK, INK_2, MUTED, RED, SURFACE,
                 ramp, style)
@@ -35,6 +35,7 @@ from engine import (BENCH_COL, BENCH_REF, FWD_COLS, OPS,
 # Palette and chart styling live in ui.py, shared with the other tool.
 
 BASE_PANEL_LABEL = "S&P 500 · 1998–2025 · basic factors"
+SHORT_PANEL_LABEL = "S&P 500 · 1998–2025 · short-risk factors"
 
 HORIZON_LABELS = {"fwd_1m": "1 month", "fwd_3m": "3 months",
                   "fwd_6m": "6 months", "fwd_12m": "12 months"}
@@ -165,6 +166,11 @@ def base_panel() -> pd.DataFrame:
     return load_base_panel()
 
 
+@st.cache_data(show_spinner="Loading short-risk panel…")
+def short_panel() -> pd.DataFrame:
+    return load_short_panel()
+
+
 def read_upload(data: bytes) -> pd.DataFrame:
     """
     Parse an uploaded CSV once per session, not on every widget rerun.
@@ -212,17 +218,23 @@ st.title("Edge Concierge")
 
 with st.container(border=True, key="step1"):
     st.subheader('1 · Panel', help='The data every later step is measured on. The shipped panel is point-in-time S&P 500 membership with 24 raw features and forward returns; an upload replaces it wholesale.')
-    source = st.radio("Panel", [BASE_PANEL_LABEL, "Upload CSV"],
-                      help="Point-in-time S&P 500 constituents (quarterly "
-                           "membership snapshots, no survivorship bias), monthly, "
-                           "1998 → Dec 2025 with post-2025 held out-of-sample. "
-                           "24 raw value / quality / safety / growth / momentum / "
-                           "size features, plus forward returns at 1/3/6/12m.")
+    source = st.radio("Panel", [BASE_PANEL_LABEL, SHORT_PANEL_LABEL, "Upload CSV"],
+                      help="Both shipped panels are point-in-time S&P 500 "
+                           "constituents, monthly 1998 → Dec 2025, post-2025 held "
+                           "out. **Basic factors**: 24 value / quality / growth / "
+                           "momentum features. **Short-risk factors**: the "
+                           "blowup-screen set — cash-burn and loss streaks, "
+                           "dilution, asset doubling, price runs, vol, drawdown — "
+                           "oriented so higher = riskier, so expect *negative* "
+                           "ICs and weight them accordingly.")
 
     panel = None
     panel_key = "base"
     if source == BASE_PANEL_LABEL:
         panel = base_panel()
+    elif source == SHORT_PANEL_LABEL:
+        panel = short_panel()
+        panel_key = "short"
     else:
         up = st.file_uploader("CSV — one row per security per date", type="csv")
         st.caption(
@@ -358,6 +370,10 @@ features = feature_columns(panel)
 
 if "builder" not in st.session_state:
     st.session_state["builder"] = default_builder_rows(features)
+if not set(st.session_state["builder"]["feature"].dropna()) & set(features):
+    # none of the stored rows exist in this panel (panel was switched) — reset
+    st.session_state["builder"] = default_builder_rows(features)
+    st.session_state.pop("builder_editor", None)
 
 
 def spec_formula(rows: list[tuple], sector_neutral: bool,
