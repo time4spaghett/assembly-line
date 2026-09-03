@@ -474,10 +474,11 @@ def live_rows() -> list[tuple]:
 
 
 if "constraints" not in st.session_state:
+    _rows = [c for c in EXAMPLE_CONSTRAINTS if c["left"] in feature_columns(panel)]
+    # explicit object dtype: an empty frame otherwise gets whatever the pandas
+    # default is, and the data_editor's arrow serialization must not depend on it
     st.session_state["constraints"] = pd.DataFrame(
-        [c for c in EXAMPLE_CONSTRAINTS
-         if c["left"] in feature_columns(panel)],
-        columns=["left", "op", "right"])
+        _rows, columns=["left", "op", "right"]).astype(object)
 
 # ── Universe screen ──────────────────────────────────────────────────────────
 # Sector/industry pickers and the numeric conditions are the same operation:
