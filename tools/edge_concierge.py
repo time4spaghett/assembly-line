@@ -609,6 +609,8 @@ with st.container(border=True, key="step3"):
     yr_range = st.columns([2, 3])[0].slider(
         "Date range", _yr_min, _yr_max, (_yr_min, _yr_max), key="years_w")
 
+    st.caption(f"probe: pandas {pd.__version__} · numpy {np.__version__} · "
+               f"streamlit {st.__version__}")   # TEMP: cloud version probe
     st.markdown("Conditions", help="On **raw** feature values: against a number "
                 "(`roa > 0`) or another feature (`roa > asset_gr`).")
     cons_edited = st.columns([5, 1])[0].data_editor(
