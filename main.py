@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-st.set_page_config(page_title="Assembly Line", page_icon="🛎️", layout="wide")
+st.set_page_config(page_title="Edge Concierge", page_icon="🛎️", layout="wide")
 
 # ── Visual identity ──────────────────────────────────────────────────────────
 # Restrained functionalism: an off-white ground, black hairlines, square
