@@ -575,11 +575,13 @@ with st.container(border=True, key="step2"):
                 # its own line, not a parenthetical: this is the handoff from
                 # the sketch to the thing that actually runs, and it is the one
                 # instruction a first-time user needs
+                # full-ink deliberately: this is the one instruction a
+                # first-time user needs, and grey reads as skippable
                 st.markdown(
-                    ":grey[**Adjust anything below.** Every feature, weight and "
+                    "**Adjust anything below.** Every feature, weight and "
                     "condition it picked is yours to change — the universe in "
                     "step 3, the table in step 4. This description is only how "
-                    "it got there; the table is what gets tested.]")
+                    "it got there; the table is what gets tested.")
 
 with st.container(border=True, key="step3"):
     st.subheader('3 · Universe', help='Which names are eligible, decided before anything is ranked. Sector or industry cuts, a date range, and conditions on raw feature values. Names that fail a condition — or are missing either side of it — are dropped from that month, so the survivors are ranked only against each other.')
