@@ -49,24 +49,56 @@ def quarterly_streaks(arq: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(out, ignore_index=True)
 
 
-def realized_vol_63d(cache: Path, tickers: set) -> pd.DataFrame:
-    """Annualized 63-day realized vol from daily closes, sampled monthly."""
-    sep = pd.read_parquet(cache / "sep.parquet")
+def realized_vol_63d(cache: Path, tickers: set,
+                     chunk: int = 800) -> pd.DataFrame:
+    """
+    Annualized 63-day realized vol from daily closes, sampled monthly.
+
+    Chunked by ticker: one pivot over the full top-1500 union (5.5k tickers x
+    ~7k days) plus its rolling window blew past this machine's memory. Each
+    chunk pivots only its own rows, computes, and is freed before the next.
+    """
+    import gc
+    sep = pd.read_parquet(cache / "sep.parquet",
+                          columns=["ticker", "date", "closeadj"])
     sep = sep[sep["ticker"].isin(tickers)]
-    px = sep.pivot_table(index="date", columns="ticker", values="closeadj",
-                         aggfunc="last").sort_index()
-    with np.errstate(divide="ignore", invalid="ignore"):
-        lr = np.log(px.where(px > 0)).diff()
-    vol = lr.rolling(63, min_periods=40).std() * np.sqrt(252)
-    vol.index = pd.to_datetime(vol.index)
-    monthly = vol.groupby(vol.index.to_period("M")).last()
-    longf = monthly.stack().rename("vol_63d").reset_index()
-    longf.columns = ["month", "ticker", "vol_63d"]
-    return longf
+    names = sorted(sep["ticker"].unique())
+    parts = []
+    for i in range(0, len(names), chunk):
+        sub = sep[sep["ticker"].isin(names[i:i + chunk])]
+        px = (sub.drop_duplicates(["date", "ticker"], keep="last")
+                 .pivot(index="date", columns="ticker", values="closeadj")
+                 .sort_index().astype("float32"))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            lr = np.log(px.where(px > 0)).diff()
+        vol = lr.rolling(63, min_periods=40).std() * np.sqrt(252)
+        vol.index = pd.to_datetime(vol.index)
+        monthly = vol.groupby(vol.index.to_period("M")).last()
+        longf = monthly.stack().rename("vol_63d").reset_index()
+        longf.columns = ["month", "ticker", "vol_63d"]
+        parts.append(longf)
+        del sub, px, lr, vol, monthly
+        gc.collect()
+        log.info("  vol chunk %d-%d done", i, min(i + chunk, len(names)))
+    del sep
+    gc.collect()
+    return pd.concat(parts, ignore_index=True)
 
 
-def build(cache: Path, sp500_path: Path, out: Path, jitter: bool = True) -> None:
-    uni = load_universe(cache, sp500_path)
+def top1500_universe(cache: Path) -> pd.DataFrame:
+    """The full monthly top-1500-by-marketcap membership — the universe the
+    risk-screen factors were actually validated on (base blowup rate 8.6%)."""
+    uni = pd.read_parquet(cache / "universe_monthly.parquet")
+    uni["month"] = uni["snap_date"].dt.to_period("M")
+    log.info("Top-1500 universe: %d rows, %d months, %d tickers",
+             len(uni), uni["month"].nunique(), uni["ticker"].nunique())
+    return uni
+
+
+def build(cache: Path, sp500_path: Path, out: Path, jitter: bool = True,
+          universe: str = "sp500") -> None:
+    uni = (top1500_universe(cache) if universe == "top1500"
+           else load_universe(cache, sp500_path))
     tickers = set(uni["ticker"].unique())
 
     px = monthly_prices(cache, tickers)
@@ -156,7 +188,10 @@ if __name__ == "__main__":
     ap.add_argument("--cache", required=True)
     ap.add_argument("--sp500", required=True)
     ap.add_argument("--out", default="data/short_panel.parquet")
+    ap.add_argument("--universe", choices=["sp500", "top1500"], default="top1500",
+                help="top1500 is what ships: the universe the factors were "
+                     "validated on, and roughly 2x the signal of sp500-only")
     ap.add_argument("--no-jitter", action="store_true")
     args = ap.parse_args()
     build(Path(args.cache), Path(args.sp500), Path(args.out),
-          jitter=not args.no_jitter)
+          jitter=not args.no_jitter, universe=args.universe)

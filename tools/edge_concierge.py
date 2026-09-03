@@ -35,7 +35,7 @@ from engine import (BENCH_COL, BENCH_REF, FWD_COLS, OPS,
 # Palette and chart styling live in ui.py, shared with the other tool.
 
 BASE_PANEL_LABEL = "S&P 500 · 1998–2025 · basic factors"
-SHORT_PANEL_LABEL = "S&P 500 · 1998–2025 · short-risk factors"
+SHORT_PANEL_LABEL = "Top 1500 · 1998–2025 · short-risk factors"
 
 HORIZON_LABELS = {"fwd_1m": "1 month", "fwd_3m": "3 months",
                   "fwd_6m": "6 months", "fwd_12m": "12 months"}
@@ -219,14 +219,14 @@ st.title("Edge Concierge")
 with st.container(border=True, key="step1"):
     st.subheader('1 · Panel', help='The data every later step is measured on. The shipped panel is point-in-time S&P 500 membership with 24 raw features and forward returns; an upload replaces it wholesale.')
     source = st.radio("Panel", [BASE_PANEL_LABEL, SHORT_PANEL_LABEL, "Upload CSV"],
-                      help="Both shipped panels are point-in-time S&P 500 "
-                           "constituents, monthly 1998 → Dec 2025, post-2025 held "
-                           "out. **Basic factors**: 24 value / quality / growth / "
-                           "momentum features. **Short-risk factors**: the "
-                           "blowup-screen set — cash-burn and loss streaks, "
-                           "dilution, asset doubling, price runs, vol, drawdown — "
-                           "oriented so higher = riskier, so expect *negative* "
-                           "ICs and weight them accordingly.")
+                      help="Monthly panels, 1998 → Dec 2025, post-2025 held out. "
+                           "**Basic factors**: point-in-time S&P 500, 24 value / "
+                           "quality / growth / momentum features. **Short-risk "
+                           "factors**: top-1500 by market cap — the blowup-screen "
+                           "set (cash-burn and loss streaks, dilution, asset "
+                           "doubling, price runs, vol, drawdown), oriented so "
+                           "higher = riskier: expect negative ICs and weight "
+                           "accordingly.")
 
     panel = None
     panel_key = "base"
