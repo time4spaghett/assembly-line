@@ -449,7 +449,7 @@ def edge_builder(name: str, key: str, default_rows: list[dict],
     # English sketch, same planner as the Concierge; writes only this edge's
     # table (the universe stays whatever step 2 says).
     if _NL_KEY:
-        with st.expander("Describe this edge in English"):
+        with st.expander("Describe this edge in English", expanded=True):
             desc = st.text_area("Features and weights, or just the idea", height=70,
                                 key=f"{key}_desc", label_visibility="collapsed",
                                 placeholder="e.g. cheap, profitable, improving; avoid "
