@@ -497,6 +497,10 @@ with st.container(border=True, key="step2"):
         _nl_key = api_key()
     except Exception:
         _nl_key = None
+    if not _nl_key:
+        st.caption("The English sketch box needs an `ANTHROPIC_API_KEY` — set it in "
+                   "the environment, or under **Secrets** in the Streamlit Cloud app "
+                   "settings. Everything below works without it.")
     if _nl_key:
         with st.expander("Describe your edge in English", expanded=True):
             # a text area, not an input: the sample prompt is a sentence and a

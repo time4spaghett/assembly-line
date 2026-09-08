@@ -403,6 +403,13 @@ if fpanel.empty:
 
 # ── 3 · The two edges ─────────────────────────────────────────────────────────
 
+try:
+    from nl import api_key as _nl_api_key
+    _NL_KEY = _nl_api_key()
+except Exception:
+    _NL_KEY = None
+
+
 def _live_rows(state_key: str, editor_key: str) -> list[tuple]:
     base = st.session_state[state_key].copy().reset_index(drop=True)
     state = st.session_state.get(editor_key) or {}
@@ -439,6 +446,34 @@ def edge_builder(name: str, key: str, default_rows: list[dict],
     if _stored is None or not set(_stored["feature"].dropna()) <= set(features):
         st.session_state[f"{key}_rows"] = _default_rows(default_rows, features)
         st.session_state.pop(f"{key}_editor", None)
+    # English sketch, same planner as the Concierge; writes only this edge's
+    # table (the universe stays whatever step 2 says).
+    if _NL_KEY:
+        with st.expander("Describe this edge in English"):
+            desc = st.text_area("Features and weights, or just the idea", height=70,
+                                key=f"{key}_desc", label_visibility="collapsed",
+                                placeholder="e.g. cheap, profitable, improving; avoid "
+                                            "the volatile names")
+            if st.button("Draft", key=f"{key}_draft") and desc:
+                try:
+                    from nl import plan_edge
+                    with st.status("Reading your description…", expanded=False) as _s:
+                        plan = plan_edge(desc, features,
+                                         sorted(panel["sector"].dropna().unique()), _NL_KEY)
+                        _s.update(label="Drafted", state="complete")
+                    st.session_state[f"{key}_rows"] = pd.DataFrame(
+                        [r.model_dump() for r in plan.rows])
+                    st.session_state.pop(f"{key}_editor", None)
+                    st.session_state[f"{key}_note"] = plan.rationale
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Couldn't draft: {e}")
+            if st.session_state.get(f"{key}_note"):
+                st.caption(f"→ {st.session_state[f'{key}_note']}  Adjust anything in "
+                           f"the table; the table is what gets tested.")
+    else:
+        st.caption("English sketch needs an `ANTHROPIC_API_KEY` (env or Streamlit "
+                   "Secrets).")
     edited = st.data_editor(
         st.session_state[f"{key}_rows"], num_rows="dynamic", width="stretch",
         hide_index=True, key=f"{key}_editor",
