@@ -111,6 +111,11 @@ def ambiguous_date(col: pd.Series) -> str | None:
     ISO needs no special case — dayfirst is inert for YYYY-MM-DD, so it agrees
     with itself and passes here like any other unambiguous format.
     """
+    # ISO first: a column that parses cleanly as YYYY-MM-DD (with or without a
+    # time part) is unambiguous by construction, whatever dayfirst would do.
+    iso = pd.to_datetime(col, errors="coerce", format="ISO8601")
+    if iso.notna().sum() == col.notna().sum():
+        return None
     a = pd.to_datetime(col, errors="coerce", dayfirst=False)
     b = pd.to_datetime(col, errors="coerce", dayfirst=True)
     disagree = (a != b) & a.notna() & b.notna()
@@ -125,16 +130,11 @@ def normalize_csv(raw: pd.DataFrame, id_col: str, date_col: str,
     """
     Map an uploaded CSV onto the canonical panel contract.
 
-    Raises AmbiguousDates if the date column has two defensible readings; see
-    date_format_check. Callers should surface that rather than work around it.
+    Dates are read month-first (pandas' default), ISO always exact. A column
+    with two defensible readings is no longer refused: `ambiguous_date` is
+    advisory and the pages show it as a warning, because the check produced
+    false positives on files whose dates were fine and blocked the upload.
     """
-    example = ambiguous_date(raw[date_col])
-    if example is not None:
-        raise AmbiguousDates(
-            f"The date column '{date_col}' is ambiguous — {example!r} could be "
-            f"day-first or month-first. Re-save that column as YYYY-MM-DD and "
-            f"upload again.")
-
     df = raw.copy()
     df["ticker"] = df[id_col].astype(str).str.strip().str.upper()
     df["date"] = pd.to_datetime(df[date_col], errors="coerce")

@@ -320,8 +320,9 @@ with st.container(border=True, key="step1"):
                                                   "asof"), min(1, len(cols) - 1)))
             _dex = ambiguous_date(raw[date_col])
             if _dex is not None:
-                st.error(f"`{date_col}` is ambiguous — {_dex!r} could be day-first "
-                         f"or month-first. Re-save it as **YYYY-MM-DD**.")
+                st.warning(f"Confirm your dates are formatted as **YYYY-MM-DD** — "
+                           f"`{date_col}` has values like {_dex!r} that could read "
+                           f"day-first or month-first. They are read month-first.")
             opt = ["(none)"] + cols
             sector_col = st.selectbox(
                 "Sector column (optional)", opt, key="dp_sector",
@@ -351,17 +352,13 @@ with st.container(border=True, key="step1"):
             else:
                 join_base = True
                 st.caption("Security IDs must be US tickers for the join.")
-            if st.button("Load CSV", type="primary", width="stretch",
-                         disabled=_dex is not None, key="dp_load"):
-                try:
-                    st.session_state["csv_panel"] = normalize_csv(
-                        raw, id_col, date_col,
-                        None if sector_col == "(none)" else sector_col,
-                        None if industry_col == "(none)" else industry_col,
-                        price_col=price_col, fwd_map=fwd_map,
-                        join_base_returns=join_base)
-                except AmbiguousDates as e:
-                    st.error(str(e))
+            if st.button("Load CSV", type="primary", width="stretch", key="dp_load"):
+                st.session_state["csv_panel"] = normalize_csv(
+                    raw, id_col, date_col,
+                    None if sector_col == "(none)" else sector_col,
+                    None if industry_col == "(none)" else industry_col,
+                    price_col=price_col, fwd_map=fwd_map,
+                    join_base_returns=join_base)
         if "csv_panel" in st.session_state:
             panel, panel_key = st.session_state["csv_panel"], "csv"
             st.success(f"{panel['ticker'].nunique():,} securities · "

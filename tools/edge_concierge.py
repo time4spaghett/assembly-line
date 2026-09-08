@@ -258,10 +258,9 @@ with st.container(border=True, key="step1"):
 
             _dex = ambiguous_date(raw[date_col])
             if _dex is not None:
-                st.error(f"`{date_col}` is ambiguous — {_dex!r} could be day-first "
-                         f"or month-first. Re-save it as **YYYY-MM-DD** and upload "
-                         f"again; reading it either way would silently reorder the "
-                         f"calendar and corrupt every forward return.")
+                st.warning(f"Confirm your dates are formatted as **YYYY-MM-DD** — "
+                           f"`{date_col}` has values like {_dex!r} that could read "
+                           f"day-first or month-first. They are read month-first.")
 
             opt = ["(none)"] + cols
             sector_col = st.selectbox("Sector column (optional)", opt,
@@ -298,17 +297,13 @@ with st.container(border=True, key="step1"):
             st.caption("Every other numeric column becomes a selectable feature — "
                        "including a benchmark return series, which you then pick "
                        "under **Benchmark** in Test setup.")
-            if st.button("Load CSV", type="primary", width="stretch",
-                         disabled=_dex is not None):
-                try:
-                    st.session_state["csv_panel"] = normalize_csv(
-                        raw, id_col, date_col,
-                        None if sector_col == "(none)" else sector_col,
-                        None if industry_col == "(none)" else industry_col,
-                        price_col=price_col, fwd_map=fwd_map,
-                        join_base_returns=join_base)
-                except AmbiguousDates as e:
-                    st.error(str(e))
+            if st.button("Load CSV", type="primary", width="stretch"):
+                st.session_state["csv_panel"] = normalize_csv(
+                    raw, id_col, date_col,
+                    None if sector_col == "(none)" else sector_col,
+                    None if industry_col == "(none)" else industry_col,
+                    price_col=price_col, fwd_map=fwd_map,
+                    join_base_returns=join_base)
 
         if "csv_panel" in st.session_state:
             panel = st.session_state["csv_panel"]
