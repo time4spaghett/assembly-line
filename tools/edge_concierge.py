@@ -21,9 +21,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from data_io import (REFERENCE_LABELS, AmbiguousDates, ambiguous_date,
-                     load_base_panel, load_benchmarks, load_short_panel,
-                     normalize_csv, reference_series)
+from data_io import (REFERENCE_LABELS, ambiguous_date, load_base_panel,
+                     load_benchmarks, load_short_panel, normalize_csv,
+                     reference_series)
 from report import build_report as _build_report
 from ui import (BASELINE, BLUE, GRID, INK, INK_2, MUTED, RED, SURFACE,
                 ramp, style)
@@ -211,6 +211,12 @@ def cached_run(engine_sig: str, panel_key: str, panel: pd.DataFrame,
                     bench_series=series)
 
 
+# ── Hidden developer mode ─────────────────────────────────────────────────────
+# No switch anywhere in the UI — append ?dev=1 to the URL. Left out of the
+# sidebar so it doesn't invite curious clicks; it's a debugging aid for
+# whoever runs this app, not a feature end users should discover.
+DEV_MODE = st.query_params.get("dev") == "1"
+
 # ── Sidebar: data + universe ─────────────────────────────────────────────────
 
 st.title("Edge Concierge")
@@ -270,10 +276,12 @@ with st.container(border=True, key="step1"):
 
             _dex = ambiguous_date(raw[date_col])
             if _dex is not None:
-                st.error(f"`{date_col}` is ambiguous — {_dex!r} could be day-first "
-                         f"or month-first. Re-save it as **YYYY-MM-DD** and upload "
-                         f"again; reading it either way would silently reorder the "
-                         f"calendar and corrupt every forward return.")
+                st.warning(f"`{date_col}` is ambiguous — {_dex!r} could be day-first "
+                           f"or month-first. Reading it the wrong way would "
+                           f"silently reorder the calendar and corrupt every "
+                           f"forward return, so double check before loading. "
+                           f"If you're confident it's right, proceed — or "
+                           f"re-save as **YYYY-MM-DD** to remove the guesswork.")
 
             opt = ["(none)"] + cols
             sector_col = st.selectbox("Sector column (optional)", opt,
@@ -310,17 +318,13 @@ with st.container(border=True, key="step1"):
             st.caption("Every other numeric column becomes a selectable feature — "
                        "including a benchmark return series, which you then pick "
                        "under **Benchmark** in Test setup.")
-            if st.button("Load CSV", type="primary", width="stretch",
-                         disabled=_dex is not None):
-                try:
-                    st.session_state["csv_panel"] = normalize_csv(
-                        raw, id_col, date_col,
-                        None if sector_col == "(none)" else sector_col,
-                        None if industry_col == "(none)" else industry_col,
-                        price_col=price_col, fwd_map=fwd_map,
-                        join_base_returns=join_base)
-                except AmbiguousDates as e:
-                    st.error(str(e))
+            if st.button("Load CSV", type="primary", width="stretch"):
+                st.session_state["csv_panel"] = normalize_csv(
+                    raw, id_col, date_col,
+                    None if sector_col == "(none)" else sector_col,
+                    None if industry_col == "(none)" else industry_col,
+                    price_col=price_col, fwd_map=fwd_map,
+                    join_base_returns=join_base)
 
         if "csv_panel" in st.session_state:
             panel = st.session_state["csv_panel"]
@@ -608,11 +612,15 @@ with st.container(border=True, key="step3"):
             placeholder="All industries", key="industries_w")
 
     _yr_min, _yr_max = int(panel["date"].min().year), int(panel["date"].max().year)
-    yr_range = st.columns([2, 3])[0].slider(
-        "Date range", _yr_min, _yr_max, (_yr_min, _yr_max), key="years_w")
+    if _yr_min == _yr_max:
+        # st.slider needs min < max — a single-year panel (e.g. a narrow upload)
+        # has nothing to range over, so skip it rather than crash.
+        yr_range = (_yr_min, _yr_max)
+        st.columns([2, 3])[0].caption(f"Date range — every row is {_yr_min}.")
+    else:
+        yr_range = st.columns([2, 3])[0].slider(
+            "Date range", _yr_min, _yr_max, (_yr_min, _yr_max), key="years_w")
 
-    st.caption(f"probe: pandas {pd.__version__} · numpy {np.__version__} · "
-               f"streamlit {st.__version__}")   # TEMP: cloud version probe
     st.markdown("Conditions", help="On **raw** feature values: against a number "
                 "(`roa > 0`) or another feature (`roa > asset_gr`).")
     cons_edited = st.columns([5, 1])[0].data_editor(

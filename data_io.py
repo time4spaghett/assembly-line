@@ -73,10 +73,6 @@ def _fwd_from_prices(df: pd.DataFrame, price_col: str) -> pd.DataFrame:
     return out
 
 
-class AmbiguousDates(ValueError):
-    """Raised when a date column has more than one defensible reading."""
-
-
 def ambiguous_date(col: pd.Series) -> str | None:
     """
     Return an offending value if the column has two defensible readings, else None.
@@ -104,16 +100,11 @@ def normalize_csv(raw: pd.DataFrame, id_col: str, date_col: str,
     """
     Map an uploaded CSV onto the canonical panel contract.
 
-    Raises AmbiguousDates if the date column has two defensible readings; see
-    date_format_check. Callers should surface that rather than work around it.
+    Ambiguous dates (day-first vs month-first) are flagged by ambiguous_date()
+    for the caller to warn about, not enforced here — a false positive on a
+    file the uploader has already verified shouldn't block the load. Parsed
+    month-first, pandas' default.
     """
-    example = ambiguous_date(raw[date_col])
-    if example is not None:
-        raise AmbiguousDates(
-            f"The date column '{date_col}' is ambiguous — {example!r} could be "
-            f"day-first or month-first. Re-save that column as YYYY-MM-DD and "
-            f"upload again.")
-
     df = raw.copy()
     df["ticker"] = df[id_col].astype(str).str.strip().str.upper()
     df["date"] = pd.to_datetime(df[date_col], errors="coerce")
