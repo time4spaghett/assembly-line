@@ -149,6 +149,11 @@ def normalize_csv(raw: pd.DataFrame, id_col: str, date_col: str,
     used = {id_col, date_col, sector_col, industry_col} - {None}
     if fwd_map:
         df = df.rename(columns={src: h for h, src in fwd_map.items()})
+        # the engine reads every horizon column (fwd_1m for the cumulative
+        # curves in particular); the ones the file didn't supply exist as NaN
+        for h in FWD_COLS:
+            if h not in df.columns:
+                df[h] = float("nan")
         used |= set()  # renamed in place
     if price_col:
         df = _fwd_from_prices(df, price_col)

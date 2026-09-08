@@ -400,6 +400,21 @@ fpanel = uni["panel"]
 if fpanel.empty:
     st.info("Nothing survives the screen.")
     st.stop()
+HORIZONS_AVAILABLE = [h for h in FWD_COLS
+                      if h in fpanel.columns and fpanel[h].notna().sum() >= 100]
+if not HORIZONS_AVAILABLE:
+    st.error("This panel has no forward returns in the current screen — nothing "
+             "can be scored. Upload a price column, a forward-return column, or "
+             "join returns from the base panel.")
+    st.stop()
+if len(HORIZONS_AVAILABLE) == 1:
+    st.warning(f"This panel only has **{HORIZON_LABELS[HORIZONS_AVAILABLE[0]]}** forward "
+               f"returns, so both edges are scored on that horizon — the destination "
+               f"cannot be tested at 12 months here. Upload a price column to get "
+               f"1/3/6/12-month returns.")
+if "fwd_1m" not in HORIZONS_AVAILABLE:
+    st.warning("No 1-month forward returns in this panel: the pacing backtest and "
+               "the alpha term structure need them and will be skipped.")
 
 # ── 3 · The two edges ─────────────────────────────────────────────────────────
 
@@ -488,9 +503,19 @@ def edge_builder(name: str, key: str, default_rows: list[dict],
             for r in edited.dropna(subset=["feature", "weight"]).itertuples()
             if r.weight != 0]
     c1, c2 = st.columns(2)
-    horizon = c1.selectbox("Scored on", list(FWD_COLS), key=f"{key}_horizon",
-                           index=list(FWD_COLS).index(default_horizon),
-                           format_func=HORIZON_LABELS.get)
+    # Only horizons this panel actually has returns for. An uploaded file
+    # with a single forward-return column has one; scoring a 12m destination
+    # on it produced NaN metrics and a meaningless verdict.
+    if default_horizon not in HORIZONS_AVAILABLE:
+        default_horizon = (HORIZONS_AVAILABLE[-1] if key.endswith("dest")
+                           else HORIZONS_AVAILABLE[0])
+    if st.session_state.get(f"{key}_horizon") not in HORIZONS_AVAILABLE:
+        st.session_state.pop(f"{key}_horizon", None)
+    horizon = c1.selectbox("Scored on", HORIZONS_AVAILABLE, key=f"{key}_horizon",
+                           index=HORIZONS_AVAILABLE.index(default_horizon),
+                           format_func=HORIZON_LABELS.get,
+                           help="Only horizons with forward returns in this panel. "
+                                "Upload a price column to get all four.")
     neutral = c2.toggle("Sector-neutral", key=f"{key}_neutral",
                         help="Rank within sector. Moot when coverage is one sector.")
     st.caption(f"`{_formula(rows)}`")
@@ -616,12 +641,19 @@ def cached_term(sig: str, sample: str, frame: pd.DataFrame, cd: pd.Series,
 
 
 _sub0 = SAMPLES[sample].reset_index(drop=True)
-_ts = cached_term(ENGINE_SIG + str(dest["rows"]) + str(path["rows"]), sample,
-                  _sub0[["date", "ticker", "fwd_1m"]],
-                  res["Destination"]["composite"].reset_index(drop=True),
-                  res["Path"]["composite"].reset_index(drop=True), min_n)
-t1, t2 = st.columns([3, 2])
-with t1:
+HAS_1M = "fwd_1m" in HORIZONS_AVAILABLE
+_ts = (cached_term(ENGINE_SIG + str(dest["rows"]) + str(path["rows"]), sample,
+                   _sub0[["date", "ticker", "fwd_1m"]],
+                   res["Destination"]["composite"].reset_index(drop=True),
+                   res["Path"]["composite"].reset_index(drop=True), min_n)
+       if HAS_1M else None)
+if _ts is None:
+    st.caption("Alpha term structure skipped — it needs 1-month forward returns.")
+    t1 = t2 = None
+else:
+    t1, t2 = st.columns([3, 2])
+if t1 is not None:
+  with t1:
     _f = go.Figure()
     for nm, col in (("Destination", BLUE), ("Path", RED)):
         _f.add_trace(go.Scatter(x=_ts.index, y=_ts[nm], name=nm, mode="lines+markers",
@@ -631,7 +663,7 @@ with t1:
     _f.update_xaxes(title="k — return in month t+k alone", dtick=1)
     _f.update_yaxes(title="Spearman IC")
     st.plotly_chart(style(_f, 300), width="stretch")
-with t2:
+  with t2:
     _d1, _d12 = _ts.loc[1, "Destination"], _ts.loc[12, "Destination"]
     _p1, _p6 = _ts.loc[1, "Path"], _ts.loc[6, "Path"]
     st.markdown("**Alpha term structure**")
@@ -745,113 +777,117 @@ with g2:
     else:
         st.info("Too few names per destination ntile to score the path edge within it.")
 
-# ── 5 · Unite: pace the trades ───────────────────────────────────────────────
-# The destination decides where the book goes; the path edge decides how fast.
-# Three books on identical inputs isolate what the path edge adds: a naive
-# monthly rebalance, the same turnover budget spent by trade size alone, and
-# the budget spent by urgency (direction × centred path rank).
 from pace import MODES, coverage_benchmark, deferral_test, run_all, term_structure
 
-with st.container(border=True, key="step5"):
-    st.subheader("5 · Unite — pace the trades", help="Target = equal weight over the "
-                 "top destination ntile. Each month the book moves toward it, but "
-                 "only the names whose path signal agrees with the trade — buys "
-                 "about to run, sells about to drop — spend the turnover budget. "
-                 "The rest wait for a better month.")
-    u1, u2, u3, u4 = st.columns([2, 2, 3, 3])
-    budget = u1.slider("Turnover budget / month", 0.01, 0.30, 0.08, 0.01, key="dp_budget",
-                       format="%.2f", help="Fraction of NAV traded per month, buys "
-                       "plus sells. Names leaving coverage are sold outside it.")
-    rerank = u2.select_slider("Re-rank destination every", options=[1, 3, 6, 12], value=1,
-                              key="dp_rerank", format_func=lambda m: f"{m} mo",
-                              help="A 12-month signal re-ranked monthly mostly shuffles "
-                                   "names across the ntile boundary. Holding the target "
-                                   "for a quarter removes that churn at the source; the "
-                                   "budget then paces what is left.")
-    init = u3.radio("Starting book", ["Cap-weighted coverage", "Equal-weight coverage"],
-                    key="dp_init", horizontal=True,
-                    help="Where the analyst starts before migrating to the target.")
-    u4.caption(f"Target: equal weight over destination ntile Q{n_q} of the coverage, "
-               f"re-ranked every {rerank} month(s). Sample: **{sample}**.")
+if not HAS_1M:
+    st.info("Pacing backtest skipped — it needs 1-month forward returns. Upload a price column to get them.")
+else:
+    # ── 5 · Unite: pace the trades ───────────────────────────────────────────────
+    # The destination decides where the book goes; the path edge decides how fast.
+    # Three books on identical inputs isolate what the path edge adds: a naive
+    # monthly rebalance, the same turnover budget spent by trade size alone, and
+    # the budget spent by urgency (direction × centred path rank).
+
+    with st.container(border=True, key="step5"):
+        st.subheader("5 · Unite — pace the trades", help="Target = equal weight over the "
+                     "top destination ntile. Each month the book moves toward it, but "
+                     "only the names whose path signal agrees with the trade — buys "
+                     "about to run, sells about to drop — spend the turnover budget. "
+                     "The rest wait for a better month.")
+        u1, u2, u3, u4 = st.columns([2, 2, 3, 3])
+        budget = u1.slider("Turnover budget / month", 0.01, 0.30, 0.08, 0.01, key="dp_budget",
+                           format="%.2f", help="Fraction of NAV traded per month, buys "
+                           "plus sells. Names leaving coverage are sold outside it.")
+        rerank = u2.select_slider("Re-rank destination every", options=[1, 3, 6, 12], value=1,
+                                  key="dp_rerank", format_func=lambda m: f"{m} mo",
+                                  help="A 12-month signal re-ranked monthly mostly shuffles "
+                                       "names across the ntile boundary. Holding the target "
+                                       "for a quarter removes that churn at the source; the "
+                                       "budget then paces what is left.")
+        init = u3.radio("Starting book", ["Cap-weighted coverage", "Equal-weight coverage"],
+                        key="dp_init", horizontal=True,
+                        help="Where the analyst starts before migrating to the target.")
+        u4.caption(f"Target: equal weight over destination ntile Q{n_q} of the coverage, "
+                   f"re-ranked every {rerank} month(s). Sample: **{sample}**.")
 
 
-@st.cache_data(show_spinner="Pacing the book…")
-def cached_pace(sig: str, sample: str, frame: pd.DataFrame, budget: float, n_q: int,
-                init: str, rerank: int) -> dict:
-    res = run_all(frame, budget=budget, n_q=n_q, init=init, rerank_every=rerank)
-    return {m: {"cum": r.cum, "summary": r.summary(), "turnover": r.turnover,
-                "distance": r.distance, "deferral": deferral_test(r)}
-            for m, r in res.items()}
+    @st.cache_data(show_spinner="Pacing the book…")
+    def cached_pace(sig: str, sample: str, frame: pd.DataFrame, budget: float, n_q: int,
+                    init: str, rerank: int) -> dict:
+        res = run_all(frame, budget=budget, n_q=n_q, init=init, rerank_every=rerank)
+        return {m: {"cum": r.cum, "summary": r.summary(), "turnover": r.turnover,
+                    "distance": r.distance, "deferral": deferral_test(r)}
+                for m, r in res.items()}
 
 
-_pace_in = pd.DataFrame({
-    "date": sub["date"], "ticker": sub["ticker"], "dest": cd_, "path": cp_,
-    "fwd_1m": sub["fwd_1m"],
-    "log_mcap": sub["log_mcap"] if "log_mcap" in sub else np.nan})
-_pace_sig = f"{ENGINE_SIG}|{panel_key}|{dest['rows']}|{path['rows']}|{dest['neutral']}|{path['neutral']}"
-paced = cached_pace(_pace_sig, sample, _pace_in, float(budget), int(n_q),
-                    "cap" if init.startswith("Cap") else "ew", int(rerank))
-bench = coverage_benchmark(_pace_in)
-bench_cum = (1.0 + bench).cumprod()
+    _pace_in = pd.DataFrame({
+        "date": sub["date"], "ticker": sub["ticker"], "dest": cd_, "path": cp_,
+        "fwd_1m": sub["fwd_1m"],
+        "log_mcap": sub["log_mcap"] if "log_mcap" in sub else np.nan})
+    _pace_sig = f"{ENGINE_SIG}|{panel_key}|{dest['rows']}|{path['rows']}|{dest['neutral']}|{path['neutral']}"
+    paced = cached_pace(_pace_sig, sample, _pace_in, float(budget), int(n_q),
+                        "cap" if init.startswith("Cap") else "ew", int(rerank))
+    bench = coverage_benchmark(_pace_in)
+    bench_cum = (1.0 + bench).cumprod()
 
-LABELS = {"wholesale": f"Wholesale rebalance (k = 1, re-rank {rerank} mo)",
-          "uniform": f"Budget {budget:.0%}, by trade size",
-          "modulated": f"Budget {budget:.0%}, by urgency (path edge)"}
-fig = go.Figure()
-fig.add_trace(go.Scatter(x=bench_cum.index, y=bench_cum.values, name="Coverage, equal-weight",
-                         mode="lines", line=dict(color=INK_2, width=2, dash="dash"),
-                         hovertemplate="%{y:.2f}×<extra></extra>"))
-for m, col in zip(MODES, ("#9ec5f4", "#5598e7", BLUE)):
-    c = paced[m]["cum"]
-    fig.add_trace(go.Scatter(x=c.index, y=c.values, name=LABELS[m], mode="lines",
-                             line=dict(color=col, width=2 if m != "modulated" else 3),
+    LABELS = {"wholesale": f"Wholesale rebalance (k = 1, re-rank {rerank} mo)",
+              "uniform": f"Budget {budget:.0%}, by trade size",
+              "modulated": f"Budget {budget:.0%}, by urgency (path edge)"}
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=bench_cum.index, y=bench_cum.values, name="Coverage, equal-weight",
+                             mode="lines", line=dict(color=INK_2, width=2, dash="dash"),
                              hovertemplate="%{y:.2f}×<extra></extra>"))
-fig.update_yaxes(type="log", title="Growth of $1 (log)")
-st.plotly_chart(style(fig, 380), width="stretch")
+    for m, col in zip(MODES, ("#9ec5f4", "#5598e7", BLUE)):
+        c = paced[m]["cum"]
+        fig.add_trace(go.Scatter(x=c.index, y=c.values, name=LABELS[m], mode="lines",
+                                 line=dict(color=col, width=2 if m != "modulated" else 3),
+                                 hovertemplate="%{y:.2f}×<extra></extra>"))
+    fig.update_yaxes(type="log", title="Growth of $1 (log)")
+    st.plotly_chart(style(fig, 380), width="stretch")
 
-_sum = pd.DataFrame({LABELS[m]: paced[m]["summary"] for m in MODES}).T
-_sum = _sum.rename(columns={"ann_return": "Ann. return", "ann_vol": "Ann. vol",
-                            "sharpe": "Sharpe", "max_drawdown": "Max DD",
-                            "avg_turnover": "Turnover / mo", "avg_forced": "Forced / mo",
-                            "avg_distance": "Dist. to target", "months": "Months"})
-_b = bench.dropna()
-_sum.loc["Coverage, equal-weight"] = {
-    "Ann. return": (1 + _b.mean()) ** 12 - 1, "Ann. vol": _b.std() * np.sqrt(12),
-    "Sharpe": ((1 + _b.mean()) ** 12 - 1) / (_b.std() * np.sqrt(12)),
-    "Max DD": (bench_cum / bench_cum.cummax() - 1).min(), "Turnover / mo": np.nan,
-    "Forced / mo": np.nan, "Dist. to target": np.nan, "Months": len(_b)}
-st.dataframe(_sum.style.format({"Ann. return": "{:+.1%}", "Ann. vol": "{:.1%}",
-                                "Sharpe": "{:.2f}", "Max DD": "{:.1%}",
-                                "Turnover / mo": "{:.1%}", "Forced / mo": "{:.1%}",
-                                "Dist. to target": "{:.1%}", "Months": "{:.0f}"},
-                               na_rep="—"), width="stretch")
-_mod, _uni, _who = (paced[m]["summary"] for m in ("modulated", "uniform", "wholesale"))
-st.caption(
-    f"Gross of costs, so the budget is the cost model. Read the two gaps separately: "
-    f"wholesale → by-size (Sharpe {_who['sharpe']:.2f} → {_uni['sharpe']:.2f}) is what "
-    f"trading less does on its own; by-size → by-urgency ({_uni['sharpe']:.2f} → "
-    f"**{_mod['sharpe']:.2f}**) is what the path edge adds at the same turnover. "
-    f"*Dist. to target* is ½·Σ|x − x*| after trading — how far the paced book lags "
-    f"the destination on average ({_mod['avg_distance']:.0%} by urgency vs "
-    f"{_uni['avg_distance']:.0%} by size).")
+    _sum = pd.DataFrame({LABELS[m]: paced[m]["summary"] for m in MODES}).T
+    _sum = _sum.rename(columns={"ann_return": "Ann. return", "ann_vol": "Ann. vol",
+                                "sharpe": "Sharpe", "max_drawdown": "Max DD",
+                                "avg_turnover": "Turnover / mo", "avg_forced": "Forced / mo",
+                                "avg_distance": "Dist. to target", "months": "Months"})
+    _b = bench.dropna()
+    _sum.loc["Coverage, equal-weight"] = {
+        "Ann. return": (1 + _b.mean()) ** 12 - 1, "Ann. vol": _b.std() * np.sqrt(12),
+        "Sharpe": ((1 + _b.mean()) ** 12 - 1) / (_b.std() * np.sqrt(12)),
+        "Max DD": (bench_cum / bench_cum.cummax() - 1).min(), "Turnover / mo": np.nan,
+        "Forced / mo": np.nan, "Dist. to target": np.nan, "Months": len(_b)}
+    st.dataframe(_sum.style.format({"Ann. return": "{:+.1%}", "Ann. vol": "{:.1%}",
+                                    "Sharpe": "{:.2f}", "Max DD": "{:.1%}",
+                                    "Turnover / mo": "{:.1%}", "Forced / mo": "{:.1%}",
+                                    "Dist. to target": "{:.1%}", "Months": "{:.0f}"},
+                                   na_rep="—"), width="stretch")
+    _mod, _uni, _who = (paced[m]["summary"] for m in ("modulated", "uniform", "wholesale"))
+    st.caption(
+        f"Gross of costs, so the budget is the cost model. Read the two gaps separately: "
+        f"wholesale → by-size (Sharpe {_who['sharpe']:.2f} → {_uni['sharpe']:.2f}) is what "
+        f"trading less does on its own; by-size → by-urgency ({_uni['sharpe']:.2f} → "
+        f"**{_mod['sharpe']:.2f}**) is what the path edge adds at the same turnover. "
+        f"*Dist. to target* is ½·Σ|x − x*| after trading — how far the paced book lags "
+        f"the destination on average ({_mod['avg_distance']:.0%} by urgency vs "
+        f"{_uni['avg_distance']:.0%} by size).")
 
-_dt = paced["modulated"]["deferral"]
-if len(_dt):
-    d1, d2 = st.columns([2, 3])
-    with d1:
-        st.dataframe(_dt.rename(columns={"side": "Side", "claim": "Claim",
-                                         "mean_diff": "Mean / mo", "t_stat": "t",
-                                         "months": "Months"})
-                     .style.format({"Mean / mo": "{:+.2%}", "t": "{:+.2f}"}),
-                     width="stretch", hide_index=True)
-    with d2:
-        st.caption(
-            "**Did waiting pay?** For buys: next-month return of the names bought this "
-            "month minus the ones the path edge said to wait on — positive means the "
-            "deferred buys were indeed cheaper a month later. For sells: deferred minus "
-            "executed — positive means the names it kept holding did keep rising. This "
-            "is the path edge scored only on the trades the destination actually wanted, "
-            "which is the only place it matters.")
+    _dt = paced["modulated"]["deferral"]
+    if len(_dt):
+        d1, d2 = st.columns([2, 3])
+        with d1:
+            st.dataframe(_dt.rename(columns={"side": "Side", "claim": "Claim",
+                                             "mean_diff": "Mean / mo", "t_stat": "t",
+                                             "months": "Months"})
+                         .style.format({"Mean / mo": "{:+.2%}", "t": "{:+.2f}"}),
+                         width="stretch", hide_index=True)
+        with d2:
+            st.caption(
+                "**Did waiting pay?** For buys: next-month return of the names bought this "
+                "month minus the ones the path edge said to wait on — positive means the "
+                "deferred buys were indeed cheaper a month later. For sells: deferred minus "
+                "executed — positive means the names it kept holding did keep rising. This "
+                "is the path edge scored only on the trades the destination actually wanted, "
+                "which is the only place it matters.")
 
 # ── Latest cross-section + handoff ───────────────────────────────────────────
 st.markdown("#### Latest cross-section")
