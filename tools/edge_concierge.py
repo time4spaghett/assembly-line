@@ -802,6 +802,16 @@ def _score(sub):
                       horizon, n_q, bench_mode, bench_col, bench_ref, tuple(cons))
 
 res = _score(SAMPLES[sample])
+if res["q_cum"].shape[1] == 0:
+    # Every date fell short of n_q*5 scored names (engine.quantile_analysis's
+    # floor for cutting ntiles), so there is nothing to chart. The per-run
+    # constraint check above catches this when constraints are the cause;
+    # this catches it when the panel itself is just thin — a small custom
+    # upload, a narrow date range, or a tight sector/industry filter.
+    st.error(f"Too few scored names per month for {n_q} ntiles anywhere in "
+             f"this sample — reduce the ntile count, widen the universe or "
+             f"date range, or pick a different sample.")
+    st.stop()
 
 # Validation runs by default, not on request: the in-sample number alone is the
 # one most likely to be believed and least likely to be true.
