@@ -716,8 +716,9 @@ _grid.index = [f"Dest Q{int(i)}" for i in _grid.index]
 _grid.columns = [f"Path Q{int(c)}" for c in _grid.columns]
 g1, g2 = st.columns([3, 2])
 with g1:
-    st.dataframe(_grid.style.format("{:+.1%}").background_gradient(cmap="RdBu", axis=None),
-                 width="stretch")
+    # No background_gradient: pandas' Styler pulls matplotlib for it, which the
+    # deployed box doesn't have (it took the whole page down there).
+    st.dataframe(_grid.style.format("{:+.1%}"), width="stretch")
     st.caption(
         f"Mean {HORIZON_LABELS[path['horizon']]} forward return, annualized, by "
         f"destination ntile (rows) × path ntile (columns). Read across a row: if the "
