@@ -802,6 +802,27 @@ def _score(sub):
                       horizon, n_q, bench_mode, bench_col, bench_ref, tuple(cons))
 
 res = _score(SAMPLES[sample])
+
+if DEV_MODE:
+    # Scored names per month against the engine's own floor (n_q*5), so a
+    # thin-data crash or warning here can be diagnosed from the app itself
+    # instead of guessing at the uploaded file's shape from the outside.
+    with st.expander(
+            f"🔧 dev — scored names per month · n_q={n_q}, floor={n_q * 5}",
+            expanded=res["q_cum"].shape[1] == 0):
+        _sub = SAMPLES[sample]
+        _diag = pd.DataFrame({"date": _sub["date"].values,
+                              "is_scored": res["composite"].notna().values})
+        _per_month = _diag.groupby("date")["is_scored"].agg(rows="size", scored="sum")
+        _per_month["floor"] = n_q * 5
+        _per_month["ok"] = _per_month["scored"] >= _per_month["floor"]
+        st.caption(f"{int(_per_month['ok'].sum())} of {len(_per_month)} months clear "
+                   f"the floor · thinnest month has "
+                   f"{int(_per_month['scored'].min()) if len(_per_month) else 0} "
+                   f"scored names · {int(_per_month['rows'].sum())} total rows, "
+                   f"{int(_per_month['scored'].sum())} scored")
+        st.dataframe(_per_month.sort_values("scored"), width="stretch")
+
 if res["q_cum"].shape[1] == 0:
     # Every date fell short of n_q*5 scored names (engine.quantile_analysis's
     # floor for cutting ntiles), so there is nothing to chart. The per-run
