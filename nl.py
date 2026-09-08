@@ -83,6 +83,67 @@ def plan_edge(description: str, features: list[str], sectors: list[str],
     return response.parsed_output
 
 
+class ConceptRule(BaseModel):
+    feature: str
+    side: str               # top | bottom
+    pct: float              # fraction of each month, 0.05–0.5
+
+
+class ConceptPlan(BaseModel):
+    name: str               # short display name, e.g. "Compounders"
+    rules: List[ConceptRule]
+    rationale: str          # how the English maps onto the panel features
+    caveats: str            # what the panel cannot express; empty if nothing
+
+
+def sketch_concept(description: str, features: list[str], key: str) -> ConceptPlan:
+    """
+    Turn an investment idea in English into quantile rules that carve a
+    concept set out of the panel — the positive examples a CAV is fit on.
+
+    The mapping is often a proxy ("returns above cost of capital" — the panel
+    has no WACC), so the model is required to say what it substituted and what
+    got lost, rather than silently pretending the panel said more than it does.
+    The result lands in the UI where the rules can be corrected by hand.
+    """
+    client = anthropic.Anthropic(api_key=key)
+    response = client.messages.parse(
+        # Opus, like plan_edge: the rationale and caveats are the product —
+        # a concept whose construction can't be explained can't be trusted
+        # when its TCAV score is read.
+        model="claude-opus-5",
+        max_tokens=1500,
+        output_config={"effort": "medium"},
+        system=(
+            "You translate a plain-English investment concept into quantile "
+            "rules over a stock panel. The rules select the EXAMPLE SET for a "
+            "concept-activation vector (TCAV): stock-months that express the "
+            "concept. Each rule is {feature, side: top|bottom, pct}: the "
+            "top/bottom `pct` fraction of each month's cross-section by that "
+            "feature's raw value. Rules AND together. Use 1–4 rules; pct "
+            "between 0.05 and 0.5 (0.2 = quintile). The set should stay "
+            "reasonably large — ANDing many tight rules leaves too few "
+            "examples to fit a probe on, so prefer 2 rules at 0.2–0.4 over 4 "
+            "rules at 0.1. "
+            f"Available features (raw values, higher = more of the named "
+            f"thing): {', '.join(features)}. "
+            "'leverage' and 'accruals' are bad in quality terms — 'bottom' of "
+            "them means cleaner names. 'asset_gr' high can mean either "
+            "aggressive expansion or ample reinvestment, depending on the "
+            "concept — read the user's intent. 'log_mcap' encodes size. "
+            "Many ideas have no direct column ('cost of capital', 'moat', "
+            "'management quality'): proxy with the nearest features, say "
+            "exactly what you substituted in `rationale`, and put what the "
+            "panel cannot express in `caveats` — an honest caveat is worth "
+            "more than a strained mapping. `name` is a 1–3 word label for the "
+            "concept."
+        ),
+        messages=[{"role": "user", "content": description}],
+        output_format=ConceptPlan,
+    )
+    return response.parsed_output
+
+
 class ValidationNote(BaseModel):
     note: str
 

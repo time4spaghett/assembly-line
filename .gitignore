@@ -5,6 +5,14 @@ __pycache__/
 
 # Pristine pre-jitter panel: local backup, not read by the app
 data/base_panel_clean.parquet
+# Larger panels stay local (the deployed dev app ships the S&P panel only —
+# users bring their own data). Each tab lists only the panels present on disk.
+data/base_panel_1500.parquet
+data/base_panel_smcap.parquet
+data/short_panel.parquet
+data/si_panel.parquet
+# Short-interest research working directory and its download cache
+si_factor/
 # Generated sample, rebuilt on demand
 data/sample_custom.csv
 

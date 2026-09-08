@@ -333,26 +333,31 @@ with st.container(border=True, key="step1"):
         st.stop()
 
 
-# ── Learned Edge handoff ─────────────────────────────────────────────────────
-# A tilt sent over from the Learned Edge becomes an ordinary feature here, so it
-# can be weighted or multiplied like any other leg. Joined on date and security
-# id; names with no tilt get the neutral 0.5 rather than being dropped, so the
-# layer is inert outside its coverage instead of shrinking the universe.
-_tilt = st.session_state.get("learned_tilt_panel")
-if _tilt is not None and "learned_tilt" not in panel.columns:
+# ── Learned / Neural Edge handoff ────────────────────────────────────────────
+# A tilt sent over from the Learned Edge or Neural Edge becomes an ordinary
+# feature here, so it can be weighted or multiplied like any other leg. Joined
+# on date and security id; names with no tilt get the neutral 0.5 rather than
+# being dropped, so the layer is inert outside its coverage instead of
+# shrinking the universe.
+for _state_key, _tilt_col, _src in (("learned_tilt_panel", "learned_tilt", "Learned Edge"),
+                                    ("neural_tilt_panel", "neural_tilt", "Neural Edge"),
+                                    ("ca_tilt_panel", "ca_tilt", "Factor Edge")):
+    _tilt = st.session_state.get(_state_key)
+    if _tilt is None or _tilt_col in panel.columns:
+        continue
     try:
         t = _tilt.copy()
         t["date"] = pd.to_datetime(t["date"])
         t["secid"] = t["secid"].astype(str).str.strip().str.upper()
-        t = t.groupby(["date", "secid"], as_index=False)["learned_tilt"].mean()
+        t = t.groupby(["date", "secid"], as_index=False)[_tilt_col].mean()
         panel = panel.merge(
             t.rename(columns={"secid": "ticker"}), on=["date", "ticker"], how="left")
-        _cov = panel["learned_tilt"].notna().mean()
-        panel["learned_tilt"] = panel["learned_tilt"].fillna(0.5)
-        st.caption(f"Learned Edge tilt merged in as `learned_tilt` — covers "
+        _cov = panel[_tilt_col].notna().mean()
+        panel[_tilt_col] = panel[_tilt_col].fillna(0.5)
+        st.caption(f"{_src} tilt merged in as `{_tilt_col}` — covers "
                    f"**{_cov:.0%}** of panel rows; the rest sit at a neutral 0.5.")
     except Exception as e:
-        st.warning(f"Couldn't merge the learned tilt: {e}")
+        st.warning(f"Couldn't merge the {_src} tilt: {e}")
 
 features = feature_columns(panel)
 

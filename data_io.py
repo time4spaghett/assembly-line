@@ -52,6 +52,32 @@ def reference_series(ticker: str, dates: pd.Series) -> pd.Series:
     return pd.Series(vals.to_numpy(), index=idx, name=ticker)
 
 
+def load_panel_1500() -> pd.DataFrame:
+    """Top-1500 by market cap, base factor set — built once by
+    panel_build_1500.py from base-equity-edge's factor zoo (2026-09-06)."""
+    return pd.read_parquet(Path(__file__).parent / "data" / "base_panel_1500.parquet")
+
+
+def load_panel_smcap() -> pd.DataFrame:
+    """Mid/small-cap band of the top-1500 panel: today's $2B–$20B market-cap
+    range taken as a percentile band (cap rank 438..1500 within each month's
+    top-1500 snapshot) and extended backward. A row filter of base_panel_1500,
+    written 2026-09-07 by the session scratchpad's make_smcap.py."""
+    return pd.read_parquet(Path(__file__).parent / "data" / "base_panel_smcap.parquet")
+
+
+def load_short_panel() -> pd.DataFrame:
+    """Top-1500 by market cap, short-risk factor set (copied from the
+    production repo 2026-09-06 — built once by short_panel_build.py there)."""
+    return pd.read_parquet(Path(__file__).parent / "data" / "short_panel.parquet")
+
+
+def load_si_panel() -> pd.DataFrame:
+    """S&P 500 short-interest / short-volume features (free FINRA data, point-in-time),
+    built by si_factor/build_features.py - see si_factor/README.md."""
+    return pd.read_parquet(Path(__file__).parent / "data" / "si_panel.parquet")
+
+
 def load_base_panel() -> pd.DataFrame:
     return pd.read_parquet(BASE_PANEL)
 

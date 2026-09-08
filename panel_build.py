@@ -62,15 +62,68 @@ def load_universe(cache: Path, sp500_path: Path) -> pd.DataFrame:
     return uni
 
 
-def monthly_prices(cache: Path, tickers: set[str]) -> pd.DataFrame:
-    """Wide monthly close panel: index=month period, columns=ticker."""
+def load_sep(cache: Path, tickers: set[str]) -> pd.DataFrame:
+    """Daily adjusted closes for the universe tickers, read once."""
     sep = pd.read_parquet(cache / "sep.parquet")
-    sep = sep[sep["ticker"].isin(tickers)]
-    sep["month"] = sep["date"].dt.to_period("M")
-    sep = sep.sort_values("date").groupby(["ticker", "month"], as_index=False).last()
-    wide = sep.pivot(index="month", columns="ticker", values="closeadj").sort_index()
+    sep = sep[sep["ticker"].isin(tickers)].copy()
+    sep["date"] = pd.to_datetime(sep["date"])
+    sep = sep.drop_duplicates(["ticker", "date"], keep="last")
+    log.info("SEP daily: %d rows, %d tickers", len(sep), sep["ticker"].nunique())
+    return sep
+
+
+def monthly_prices(sep: pd.DataFrame) -> pd.DataFrame:
+    """Wide monthly close panel: index=month period, columns=ticker."""
+    s = sep.copy()
+    s["month"] = s["date"].dt.to_period("M")
+    s = s.sort_values("date").groupby(["ticker", "month"], as_index=False).last()
+    wide = s.pivot(index="month", columns="ticker", values="closeadj").sort_index()
     log.info("Monthly price panel: %d months x %d tickers", *wide.shape)
     return wide
+
+
+def daily_risk_features(sep: pd.DataFrame) -> pd.DataFrame:
+    """
+    Risk block from daily closes, sampled at month-end — the price-based
+    features that dominate the Gu–Kelly–Xiu importance rankings and that a
+    fundamentals-only panel lacks:
+
+      vol_1m      std of daily returns, trailing 21 trading days
+      vol_12m     std of daily returns, trailing 252 days
+      max_ret_1m  largest single-day return in the trailing month (lottery)
+      beta_12m    rolling 252-day beta against the equal-weight universe
+
+    Everything derives from closeadj, so all four are split-safe. Turnover,
+    dollar volume and Amihud illiquidity would belong here too, but the cache
+    carries no volume column. Net share issuance is deliberately left out:
+    Sharadar `sharesbas` is as-reported, so a 2-for-1 split would read as
+    +100% issuance and poison the feature.
+    """
+    wide = (sep.pivot(index="date", columns="ticker", values="closeadj")
+            .sort_index().astype(np.float32))
+    ret = wide.pct_change(fill_method=None)
+    mkt = ret.mean(axis=1)
+
+    r252 = ret.rolling(252, min_periods=126)
+    m252 = mkt.rolling(252, min_periods=126)
+    feats = {
+        "vol_1m": ret.rolling(21, min_periods=15).std(),
+        "vol_12m": r252.std(),
+        "max_ret_1m": ret.rolling(21, min_periods=15).max(),
+        # beta = cov(r, mkt) / var(mkt), rolling: E[rm] − E[r]E[m] over var
+        "beta_12m": (ret.mul(mkt, axis=0).rolling(252, min_periods=126).mean()
+                     - r252.mean().mul(m252.mean(), axis=0)
+                     ).div(m252.var(), axis=0),
+    }
+    out = None
+    for name, pf in feats.items():
+        me = pf.groupby(pf.index.to_period("M")).last()
+        longf = me.stack().rename(name).reset_index()
+        longf.columns = ["month", "ticker", name]
+        out = longf if out is None else out.merge(longf, on=["month", "ticker"],
+                                                  how="outer")
+    log.info("Daily risk features: %d rows", len(out))
+    return out
 
 
 def price_features(px: pd.DataFrame) -> pd.DataFrame:
@@ -81,6 +134,7 @@ def price_features(px: pd.DataFrame) -> pd.DataFrame:
     feats = {
         "ret_1m":   logp - logp.shift(1),
         "mom_3m":   logp - logp.shift(3),
+        "mom_3_1":  logp.shift(1) - logp.shift(3),   # months 2–3, reversal month out
         "mom_6_1":  logp.shift(1) - logp.shift(6),
         "mom_12_1": logp.shift(1) - logp.shift(12),
         "high_52w": px / px.rolling(12, min_periods=6).max(),
@@ -148,9 +202,12 @@ def build(cache: Path, sp500_path: Path, out: Path, jitter: bool = False,
     tickers = set(uni["ticker"].unique())
 
     # ── Price block ───────────────────────────────────────────────────────────
-    px = monthly_prices(cache, tickers)
+    sep = load_sep(cache, tickers)
+    px = monthly_prices(sep)
     pf = price_features(px)
     panel = uni.merge(pf, on=["month", "ticker"], how="left")
+    panel = panel.merge(daily_risk_features(sep), on=["month", "ticker"], how="left")
+    del sep
 
     # ── Fundamentals: current + 1y-lagged for growth/trend features ───────────
     art = pd.read_parquet(cache / "sf1_art.parquet")

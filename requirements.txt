@@ -1,8 +1,12 @@
-streamlit>=1.38
-pandas>=2.2
-numpy>=1.26
+# Pinned to the majors the app was actually tested on. The cloud box runs a
+# newer Python than dev and will otherwise resolve pandas 3 / bleeding-edge
+# streamlit, which killed rendering at the first data_editor.
+streamlit>=1.48,<2
+pandas>=2.2,<3
+numpy>=1.26,<3
 pyarrow>=15.0
-plotly>=5.20
-scikit-learn>=1.4     # Learned Edge: walk-forward classifier
-anthropic>=0.40       # optional: natural-language edge sketching
-pydantic>=2.0         # schema for the sketched edge spec
+plotly>=5.20,<7
+scikit-learn>=1.4,<2     # Learned Edge: walk-forward classifier; Neural Edge: MLP
+scipy>=1.11,<2           # Neural Edge: TCAV significance test (sklearn dep anyway)
+anthropic>=0.40          # optional: natural-language edge sketching
+pydantic>=2.0,<3         # schema for the sketched edge spec

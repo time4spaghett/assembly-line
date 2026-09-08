@@ -82,6 +82,109 @@ Filenames are timestamped and derived from the heaviest legs, e.g.
 run configuration rather than the render, so it reads as when the run was
 produced and only changes when an input does.
 
+## Neural Edge
+
+The third tool fits a **Gu–Kelly–Xiu (2020)**-style return-forecasting net to
+the base panel — their characteristic transform (per-month cross-sectional
+ranks mapped to [−1, 1], missing → 0), their architecture pyramid with **NN3
+(32·16·8, ReLU)** as the default and best performer, and a seed ensemble —
+under the same expanding walk-forward protocol as the Learned Edge, so every
+prediction is out-of-sample. The default target is the **return over the
+equal-weight market** rather than the raw return — Chen, Hanauer & Kalsbach
+(2024, "Design choices, machine learning, and the cross-section of stock
+returns") find the target variable is among the largest of the design levers,
+and market-adjusting strips the common component a cross-sectional model
+cannot time. A toggle restores the raw-return target. Reported the GKX way: OOS R² against a zero
+forecast (their best models score ~0.4% monthly; small positive numbers are
+the win) plus the app's usual monthly IC with Newey-West t. The prediction
+rank exports to the Edge Concierge as `neural_tilt`, exactly like the learned
+tilt.
+
+Divergences from the paper, stated rather than hidden: L2 rather than L1
+penalty, a random rather than chronological early-stopping split (within the
+training window only), and no batch norm.
+
+Defaults are tuned on this panel under the walk-forward (selection on the
+2007–16 OOS half, confirmation on 2017–25): horizon 12m (fundamentals-heavy
+features carry ~8× the 1-month IC), NN3 (capacity swept from 2 neurons to
+128·64·32 — monotone up to NN3, flat-to-worse beyond), α = 1e-2, 5 seeds. At
+those defaults the net scores IC +0.042 (NW t +2.0), a +6.2% annualized
+quintile spread and 0.65 long-short Sharpe — edging the app's hand-built
+default edge, and blending with it lifts the pair to IC +0.047 / Sharpe 0.71,
+i.e. the net contributes orthogonal information rather than diluting.
+
+### Concept alignment (TCAV)
+
+The tab's second half asks how aligned the net's forecasts are with a
+*concept*, via Testing with Concept Activation Vectors (Kim et al., 2018). A
+concept is a set of stock-months, defined four ways:
+
+- a **preset** (high profitability, deep value, momentum winners, …),
+- **panel rules** — quantile conditions built on the panel's own features
+  (`gpa` in the top 20% of each month AND …),
+- an uploaded **company–date CSV** — the concept by demonstration, e.g. every
+  quarterly holding of a fund whose philosophy you want to test against, or
+- **plain English** (needs `ANTHROPIC_API_KEY`, like the Edge Concierge's
+  sketch box) — "returns above cost of capital with room to reinvest" is
+  drafted into quantile rules, with the proxy mapping and what the panel
+  *cannot* express stated alongside, and a copy-to-rule-builder button so the
+  draft can be corrected by hand.
+
+A linear probe on a hidden layer's activations separates concept rows from
+date-matched random rows; its unit normal is the CAV. The exact gradient of
+the predicted return w.r.t. that layer (hand-rolled numpy over the sklearn
+weights — no torch) is dotted with the CAV; the **TCAV score** is the fraction
+of stock-months where leaning toward the concept raises the forecast. 0.5 is
+orthogonal. Guards, both from the paper: the CAV's held-out accuracy must beat
+chance (else the concept isn't encoded at that layer and the score is noise),
+and the score distribution must separate from same-size random pseudo-concepts
+(two-sample t-test). The probe runs at the inputs or any hidden layer *except
+the last* — above the last sits only a linear readout, so the gradient there
+is the same for every row and the score degenerates to 0 or 1.
+
+TCAV interrogates a full-history fit, mirroring the Learned Edge convention:
+walk-forward for honest scores, one descriptive fit — never scored from — for
+what the model believes.
+
+An alignment run also produces two per-name series, combined in the **Best
+ideas within the concept** view: `expression` (how strongly a name embodies
+the concept — its projection onto the CAVs, pct-ranked) and `align` (the share
+of CAVs under which pushing the name further toward the concept raises its
+forecast). Crossed with the walk-forward `neural_tilt`, the view ranks concept
+members by the out-of-sample forecast at a chosen date: the return leg is the
+only OOS-protocol number, and `align` diagnoses whether the model likes a name
+*because of* the philosophy or despite it.
+
+## Factor Edge
+
+The fourth tool is Gu–Kelly–Xiu's **conditional autoencoder** (2021, *Journal
+of Econometrics*): returns are constrained to a factor structure
+`r = β(z)′f`, where a small beta network maps characteristics to K factor
+loadings and the K latent factors are distilled linearly from the month's
+characteristic-managed portfolio returns (equal-weight market first, then one
+rank-weighted portfolio per feature). Expected returns can only arise as
+compensation for factor exposure — a near-no-arbitrage constraint that
+regularizes far harder than anything in the unconstrained Neural Edge, which
+is why this family tests well on small panels.
+
+The trainer is ~200 lines of hand-rolled numpy (`autoencoder.py`): joint
+minibatch Adam over both networks (one month per step), **chronological**
+early stopping on the last 15% of training months, optional Huber loss
+(residual influence clipped at 2× the target's sd), seed ensembling, and the
+repo's expanding walk-forward. The smoke test verifies the analytic gradients
+against finite differences and that a planted factor structure is recovered.
+No torch: the networks are tiny enough that autograd is the only thing it
+would add.
+
+Reported OOS: **total R²** (fit against the month's realized factors —
+observable ex post, since factors are portfolio returns; the asset-pricing
+test) and **predictive R² / IC** (forecast via estimated premia β·λ; the
+honest prediction test). The gap between the two is the difference between
+describing risk and finding alpha. Interpretation from a full-history fit:
+factor premia and cumulative paths, plus per-characteristic loading curves.
+The β·λ rank exports to the Edge Concierge as `ca_tilt` — labeled for what it
+is: expected return earned as factor-risk compensation, not alpha.
+
 ## Base panel
 
 Point-in-time S&P 500 constituents (quarterly membership snapshots,
@@ -89,7 +192,7 @@ no survivorship bias), monthly frequency, **1998 → Dec 2025**. Data on/after
 **Jan 2026 is deliberately excluded** as an enforced out-of-sample holdout
 (`OOS_CUTOFF` in `panel_build.py`).
 
-24 raw features across the standard categories:
+28 raw features across the standard categories:
 
 | Category | Features |
 |---|---|
@@ -99,7 +202,16 @@ no survivorship bias), monthly frequency, **1998 → Dec 2025**. Data on/after
 | Growth | `rev_gr_1y`, `rev_gr_3y`, `asset_gr` |
 | Momentum | `mom_12_1`, `mom_6_1`, `mom_3m`, `ret_1m`, `high_52w` |
 | Fundamental momentum | `earn_mom`, `margin_mom`, `rev_accel` |
+| Risk | `vol_1m`, `vol_12m`, `beta_12m`, `max_ret_1m` |
 | Size | `log_mcap` |
+
+The risk block is computed from daily adjusted closes (std of daily returns
+over 21 and 252 trading days, rolling 252-day beta against the equal-weight
+universe, and the largest single-day return in the trailing month), sampled at
+month-end. These are the price-based features that dominate the GKX importance
+rankings; turnover and Amihud illiquidity would join them but the source cache
+carries no volume data, and net share issuance is left out because as-reported
+share counts read splits as issuance.
 
 Forward simple returns at 1/3/6/12-month horizons are precomputed in the panel.
 Raw values (not ranks) are stored so the app's transform step is meaningful.
@@ -153,8 +265,13 @@ example.
 | `main.py` | Entry point and tool navigation |
 | `tools/edge_concierge.py` | Build and test an edge by hand or from English |
 | `tools/learned_edge.py` | Learn a style from holdings, emit a tilt |
+| `tools/neural_edge.py` | GKX-style net + TCAV concept alignment |
+| `tools/factor_edge.py` | Conditional autoencoder: latent factors, premia, loadings |
+| `autoencoder.py` | Numpy CA trainer: joint Adam, Huber, walk-forward |
 | `ui.py` | Shared universe/constraint screen and chart styling |
 | `learned.py` | Walk-forward classifier, cohorts, interaction scan |
+| `neural.py` | GKX net, walk-forward protocol, numpy activations/gradients |
+| `concepts.py` | Concept definitions, CAVs, TCAV scoring and significance |
 | `engine.py` | Transforms, composite construction, IC / ntile / sector analysis |
 | `data_io.py` | Base panel loading + custom CSV normalization |
 | `nl.py` | Optional natural-language → edge-spec (Claude API) |

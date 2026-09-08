@@ -219,9 +219,12 @@ def _spearman(df: pd.DataFrame, a: str, b: str, min_n: int = 30) -> float:
     return float(np.corrcoef(ra, rb)[0, 1])
 
 
-def ic_analysis(panel: pd.DataFrame, comp: pd.Series, horizon: str) -> dict:
+def ic_analysis(panel: pd.DataFrame, comp: pd.Series, horizon: str,
+                min_n: int = 30) -> dict:
+    """`min_n`: fewest names a month needs to contribute an IC. 30 suits the
+    full cross-section; a single sector's coverage wants something like 10."""
     df = pd.DataFrame({"date": panel["date"], "comp": comp, "fwd": panel[horizon]})
-    ic = df.groupby("date")[["comp", "fwd"]].apply(_spearman, "comp", "fwd")
+    ic = df.groupby("date")[["comp", "fwd"]].apply(_spearman, "comp", "fwd", min_n)
     ic = ic.dropna()
     months = FWD_COLS[horizon]
     valid = ic.to_numpy()
@@ -474,10 +477,10 @@ def screen_stats(panel: pd.DataFrame, spec: EdgeSpec) -> dict:
 def run_edge(panel: pd.DataFrame, spec: EdgeSpec, horizon: str = "fwd_12m",
              n_q: int = 5, bench_mode: str = BENCH_EW,
              bench_col: str | None = None,
-             bench_series: pd.Series | None = None) -> dict:
+             bench_series: pd.Series | None = None, min_n: int = 30) -> dict:
     comp = build_composite(panel, spec)
     out = {"composite": comp, "screen": screen_stats(panel, spec)}
-    out.update(ic_analysis(panel, comp, horizon))
+    out.update(ic_analysis(panel, comp, horizon, min_n=min_n))
     out.update(quantile_analysis(panel, comp, horizon, n_q, bench_mode, bench_col,
                                  bench_series))
     out["sector_ic"] = sector_ic(panel, comp, horizon)
