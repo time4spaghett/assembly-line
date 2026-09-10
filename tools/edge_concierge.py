@@ -273,13 +273,19 @@ with st.container(border=True, key="step1"):
             # House conventions for the forward returns: `TotalReturn_USD` is the
             # 1-month forward return, and `fwd_return_3m/6m/12m` the longer ones.
             # When they're present the file needs no mapping at all.
-            _fwd_std = {"fwd_1m": "TotalReturn_USD", "fwd_3m": "fwd_return_3m",
-                        "fwd_6m": "fwd_return_6m", "fwd_12m": "fwd_return_12m"}
+            _fwd_std = {"fwd_1m": "TotalReturn_USD", "fwd_3m": "fwd_ret_3m",
+                        "fwd_6m": "fwd_ret_6m", "fwd_12m": "fwd_ret_12m"}
+            _fwd_alt = {"fwd_3m": ["fwd_return_3m"], "fwd_6m": ["fwd_return_6m"],
+                        "fwd_12m": ["fwd_return_12m"], "fwd_1m": ["TotalReturnUSD"]}
             # tolerant match: case, spaces, underscores and punctuation ignored
             _norm = lambda s: re.sub(r"[^0-9a-z]", "", str(s).lower())
             _bynorm = {_norm(c): c for c in cols}
-            _fwd_found = {h: _bynorm[_norm(n)] for h, n in _fwd_std.items()
-                          if _norm(n) in _bynorm}
+            _fwd_found = {}
+            for h, n in _fwd_std.items():
+                for cand in [n] + _fwd_alt.get(h, []):
+                    if _norm(cand) in _bynorm:
+                        _fwd_found[h] = _bynorm[_norm(cand)]
+                        break
             _has_px = any(n in c.lower() for c in cols
                           for n in ("price", "close", "px", "adj"))
             ret_src = st.radio("Forward returns come from…", [
