@@ -332,23 +332,43 @@ with st.container(border=True, key="step1"):
                 "Industry column (optional)", opt, key="dp_industry",
                 index=_guess(("industry",)) + 1
                 if any("industry" in c.lower() for c in cols) else 0)
+            # House conventions for the forward returns: `TotalReturn_USD` is the
+            # 1-month forward return, and `fwd_return_3m/6m/12m` the longer ones.
+            _fwd_std = {"fwd_1m": "TotalReturn_USD", "fwd_3m": "fwd_return_3m",
+                        "fwd_6m": "fwd_return_6m", "fwd_12m": "fwd_return_12m"}
+            _lower = {c.lower(): c for c in cols}
+            _fwd_found = {h: _lower[n.lower()] for h, n in _fwd_std.items()
+                          if n.lower() in _lower}
             _has_px = any(n in c.lower() for c in cols
                           for n in ("price", "close", "px", "adj"))
             ret_src = st.radio("Forward returns come from…", [
                 "A price column (computed at 1/3/6/12m)",
                 "A forward-return column",
                 "Join from base panel by ticker",
-            ], index=0 if _has_px else 2, key="dp_retsrc")
+            ], index=1 if _fwd_found else (0 if _has_px else 2), key="dp_retsrc")
             price_col = fwd_map = None
             join_base = False
             if ret_src.startswith("A price"):
                 price_col = st.selectbox("Price column", cols, key="dp_px",
                                          index=_guess(("price", "close", "px", "adj")))
             elif ret_src.startswith("A forward"):
-                fcol = st.selectbox("Forward-return column", cols, key="dp_fcol")
+                fcol = st.selectbox(
+                    "Forward-return column", cols, key="dp_fcol",
+                    index=cols.index(_fwd_found["fwd_1m"]) if "fwd_1m" in _fwd_found
+                    else _guess(("totalreturn", "fwd_ret", "fwdret", "return", "ret")))
                 fhor = st.selectbox("…measured over", list(FWD_COLS), key="dp_fhor",
                                     format_func=HORIZON_LABELS.get)
                 fwd_map = {fhor: fcol}
+                _extra = {h: c for h, c in _fwd_found.items() if h != fhor and c != fcol}
+                fwd_map.update(_extra)
+                _missing = [n for h, n in _fwd_std.items()
+                            if h not in fwd_map and h != "fwd_1m"]
+                st.caption(("Also using " + ", ".join(
+                    f"`{c}` → {HORIZON_LABELS[h]}" for h, c in _extra.items())
+                    + ". " if _extra else "")
+                    + (f"Not found: {', '.join(f'`{n}`' for n in _missing)} — those "
+                       f"horizons can't be scored from this file." if _missing else
+                       "All of 3, 6 and 12-month forward returns found."))
             else:
                 join_base = True
                 st.caption("Security IDs must be US tickers for the join.")
