@@ -297,30 +297,21 @@ with st.container(border=True, key="step1"):
                 price_col = st.selectbox("Price column", cols, index=_guess(
                     ("price", "close", "px", "adj")))
             elif ret_src.startswith("A forward"):
-                fcol = st.selectbox(
-                    "Forward-return column", cols,
-                    index=cols.index(_fwd_found["fwd_1m"]) if "fwd_1m" in _fwd_found
-                    else _guess(("totalreturn", "fwd_ret", "fwdret", "return", "ret")))
-                fhor = st.selectbox("…measured over", list(FWD_COLS),
-                                    format_func=HORIZON_LABELS.get)
-                fwd_map = {fhor: fcol}
-                # the longer horizons, by their standard names
-                _extra = {h: c for h, c in _fwd_found.items() if h != fhor and c != fcol}
-                fwd_map.update(_extra)
-                _missing = [n for h, n in _fwd_std.items()
-                            if h not in fwd_map and h != "fwd_1m"]
-                st.caption(("Also using " + ", ".join(
-                    f"`{c}` → {HORIZON_LABELS[h]}" for h, c in _extra.items())
-                    + ". " if _extra else "")
-                    + (f"Not found: {', '.join(f'`{n}`' for n in _missing)} — those "
-                       f"horizons can't be scored from this file." if _missing else
-                       "All of 3, 6 and 12-month forward returns found."))
-                if _missing:
-                    # exact header strings, repr'd so a stray BOM / non-breaking
-                    # space / odd dash is visible instead of invisible
-                    _cands = [c for c in cols if "ret" in c.lower() or "fwd" in c.lower()]
-                    st.caption("Headers seen that look like returns: "
-                               + ", ".join(repr(c) for c in _cands))
+                # one dropdown per horizon, defaulting to the house names
+                fwd_map = {}
+                _fc = st.columns(4)
+                for _i, (h, _std) in enumerate(_fwd_std.items()):
+                    _opts = ["(none)"] + cols
+                    _dflt = _fwd_found.get(h)
+                    _sel = _fc[_i].selectbox(
+                        f"{HORIZON_LABELS[h]} forward return", _opts, key=f"ec_fwd_{h}",
+                        index=_opts.index(_dflt) if _dflt in _opts else 0,
+                        help=f"Defaults to `{_std}` when the file has it.")
+                    if _sel != "(none)":
+                        fwd_map[h] = _sel
+                if not fwd_map:
+                    st.warning("Pick at least one forward-return column.")
+                    fwd_map = None
             else:
                 join_base = True
                 st.caption("Security IDs must be US tickers for the join.")
