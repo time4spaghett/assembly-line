@@ -275,9 +275,11 @@ with st.container(border=True, key="step1"):
             # When they're present the file needs no mapping at all.
             _fwd_std = {"fwd_1m": "TotalReturn_USD", "fwd_3m": "fwd_return_3m",
                         "fwd_6m": "fwd_return_6m", "fwd_12m": "fwd_return_12m"}
-            _lower = {c.lower(): c for c in cols}
-            _fwd_found = {h: _lower[n.lower()] for h, n in _fwd_std.items()
-                          if n.lower() in _lower}
+            # tolerant match: case, spaces, underscores and punctuation ignored
+            _norm = lambda s: re.sub(r"[^0-9a-z]", "", str(s).lower())
+            _bynorm = {_norm(c): c for c in cols}
+            _fwd_found = {h: _bynorm[_norm(n)] for h, n in _fwd_std.items()
+                          if _norm(n) in _bynorm}
             _has_px = any(n in c.lower() for c in cols
                           for n in ("price", "close", "px", "adj"))
             ret_src = st.radio("Forward returns come from…", [
