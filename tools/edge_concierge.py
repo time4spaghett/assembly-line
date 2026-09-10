@@ -315,6 +315,12 @@ with st.container(border=True, key="step1"):
                     + (f"Not found: {', '.join(f'`{n}`' for n in _missing)} — those "
                        f"horizons can't be scored from this file." if _missing else
                        "All of 3, 6 and 12-month forward returns found."))
+                if _missing:
+                    # exact header strings, repr'd so a stray BOM / non-breaking
+                    # space / odd dash is visible instead of invisible
+                    _cands = [c for c in cols if "ret" in c.lower() or "fwd" in c.lower()]
+                    st.caption("Headers seen that look like returns: "
+                               + ", ".join(repr(c) for c in _cands))
             else:
                 join_base = True
                 st.caption("Security IDs must be US tickers for the join.")
