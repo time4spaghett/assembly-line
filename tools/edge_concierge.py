@@ -27,10 +27,10 @@ from data_io import (REFERENCE_LABELS, ambiguous_date, load_base_panel,
 from report import build_report as _build_report
 from ui import (BASELINE, BLUE, GRID, INK, INK_2, MUTED, RED, SURFACE,
                 ramp, style)
-from engine import (BENCH_COL, BENCH_REF, FWD_COLS, OPS,
-                    TRANSFORMS, Constraint, EdgeSpec, FeatureSpec,
-                    benchmark_options, consistency_checks, feature_columns,
-                    run_edge)
+from engine import (BENCH_COL, BENCH_REF, COMBINE_PRODUCT, COMBINE_SUM,
+                    FWD_COLS, OPS, TRANSFORMS, Constraint, EdgeSpec,
+                    FeatureSpec, benchmark_options, consistency_checks,
+                    feature_columns, run_edge)
 
 # Palette and chart styling live in ui.py, shared with the other tool.
 
@@ -200,10 +200,12 @@ ENGINE_SIG = hashlib.md5(
 def cached_run(engine_sig: str, panel_key: str, panel: pd.DataFrame,
                spec_rows: tuple, sector_neutral: bool, horizon: str, n_q: int,
                bench_mode: str, bench_col: str | None,
-               bench_ref: str | None, cons_rows: tuple = ()) -> dict:
+               bench_ref: str | None, cons_rows: tuple = (),
+               combine: str = COMBINE_SUM) -> dict:
     spec = EdgeSpec(features=[FeatureSpec(*r) for r in spec_rows],
                     sector_neutral=sector_neutral,
-                    constraints=[Constraint(*c) for c in cons_rows])
+                    constraints=[Constraint(*c) for c in cons_rows],
+                    combine=combine)
     # built here, not passed in, so the cache key stays a short string
     series = reference_series(bench_ref, panel["date"]) if bench_ref else None
     return run_edge(panel, spec, horizon=horizon, n_q=n_q,
@@ -405,14 +407,27 @@ if not set(st.session_state["builder"]["feature"].dropna()) & set(features):
 
 
 def spec_formula(rows: list[tuple], sector_neutral: bool,
-                 cons: list[tuple] | None = None) -> str:
-    parts = []
-    for i, (feat, tr, w) in enumerate(rows):
-        term = feat if tr == "raw" else f"{tr}({feat})"
-        coef = "" if abs(w) == 1 else f"{abs(w):g}·"
-        sign = ("−" if w < 0 else "") if i == 0 else (" − " if w < 0 else " + ")
-        parts.append(f"{sign}{coef}{term}")
-    out = "edge = " + "".join(parts)
+                 cons: list[tuple] | None = None,
+                 combine: str = COMBINE_SUM) -> str:
+    if combine == COMBINE_PRODUCT:
+        # each leg is rank(feature)^|weight|, or (1-rank)^|weight| when the
+        # weight is negative — weight acts as an exponent here, not a
+        # coefficient, matching build_composite's product branch.
+        parts = []
+        for feat, tr, w in rows:
+            term = feat if tr == "raw" else f"{tr}({feat})"
+            base = f"(1−{term})" if w < 0 else term
+            exp = "" if abs(w) == 1 else f"^{abs(w):g}"
+            parts.append(f"{base}{exp}")
+        out = "edge = " + " × ".join(parts)
+    else:
+        parts = []
+        for i, (feat, tr, w) in enumerate(rows):
+            term = feat if tr == "raw" else f"{tr}({feat})"
+            coef = "" if abs(w) == 1 else f"{abs(w):g}·"
+            sign = ("−" if w < 0 else "") if i == 0 else (" − " if w < 0 else " + ")
+            parts.append(f"{sign}{coef}{term}")
+        out = "edge = " + "".join(parts)
     if cons:
         out += "   where " + " and ".join(f"{l} {o} {r}" for l, o, r in cons)
     if sector_neutral:
@@ -561,10 +576,11 @@ with st.container(border=True, key="step2"):
             c_btn, c_formula = st.columns([1, 4], vertical_alignment="center")
             cur = live_rows()
             if cur:
-                # drawn above the sector-neutral toggle, so read session state
-                # rather than the not-yet-assigned name
+                # drawn above the sector-neutral toggle and combine selector,
+                # so read session state rather than the not-yet-assigned names
                 _neutral = st.session_state.get("neutral_w", False)
-                _f = spec_formula(cur, _neutral, live_constraints())
+                _combine = st.session_state.get("combine_w", COMBINE_SUM)
+                _f = spec_formula(cur, _neutral, live_constraints(), _combine)
                 # the placeholder disappears the moment they type, so mark the
                 # formula too — otherwise the sample silently reads as theirs
                 _sample_rows = [(r["feature"], r["transform"], r["weight"])
@@ -709,10 +725,20 @@ with st.container(border=True, key="step4"):
             for r in edited.dropna(subset=["feature", "weight"]).itertuples()
             if r.weight != 0]
 
-    sector_neutral = st.columns([3, 2])[0].toggle(
+    _c_neutral, _c_combine = st.columns([3, 2])
+    sector_neutral = _c_neutral.toggle(
         "Sector-neutral (transform within sector)", key="neutral_w",
         help="Rank each name against its own sector rather than the whole "
              "cross-section — strips the sector bet out of the edge.")  # part of how the composite is built, not how it is scored
+    combine_mode = _c_combine.selectbox(
+        "Combine", [COMBINE_SUM, COMBINE_PRODUCT], key="combine_w",
+        help="**Weighted sum** — legs add, so a high score on one leg "
+             "compensates a low score on another. **Rank product** — legs "
+             "multiply (rank^|weight|, or (1−rank)^|weight| for a negative "
+             "weight), so a name has to score on every leg at once; nothing "
+             "to compensate with. Reach for product when the legs are "
+             "conditions that all need to hold, not preferences that trade "
+             "off against each other.")
 
 
 
@@ -823,7 +849,8 @@ if _cut is not None:
 
 def _score(sub):
     return cached_run(ENGINE_SIG, panel_key, sub, tuple(rows), sector_neutral,
-                      horizon, n_q, bench_mode, bench_col, bench_ref, tuple(cons))
+                      horizon, n_q, bench_mode, bench_col, bench_ref,
+                      tuple(cons), combine_mode)
 
 res = _score(SAMPLES[sample])
 
@@ -884,12 +911,13 @@ if _cut is not None and IN_SAMPLE in _opts and OUT_SAMPLE in _opts:
                    "effect, not a weaker one.")
         if _nl_key:
             _vkey = (checks["verdict"], checks["passed"],
-                     spec_formula(rows, sector_neutral, cons))
+                     spec_formula(rows, sector_neutral, cons, combine_mode))
             if st.session_state.get("_vnote_key") != _vkey:
                 try:
                     with st.spinner("Reading the validation…"):
                         st.session_state["_vnote"] = explain_validation(
-                            checks, spec_formula(rows, sector_neutral, cons),
+                            checks, spec_formula(rows, sector_neutral, cons,
+                                                 combine_mode),
                             _nl_key)
                     st.session_state["_vnote_key"] = _vkey
                 except Exception as e:
@@ -937,7 +965,7 @@ colors = ramp(n_q)   # shared by the on-screen tabs and the saved report
 # can actually be cached instead of rebuilt on every widget interaction.
 _sig = json.dumps([rows, cons, sel_sectors, sel_industries, list(yr_range),
                    horizon, int(n_q), bench_label, bool(sector_neutral),
-                   panel_key, ENGINE_SIG], default=str, sort_keys=True)
+                   combine_mode, panel_key, ENGINE_SIG], default=str, sort_keys=True)
 _stamp = st.session_state.setdefault("_run_stamps", {}).setdefault(
     _sig, datetime.now())
 _title = run_title(rows, horizon, n_q, _stamp)
@@ -948,10 +976,11 @@ record = {
     "exported_at": _stamp.isoformat(timespec="seconds"),
     "panel": BASE_PANEL_LABEL if panel_key == "base" else "custom upload",
     "spec": {
-        "formula": spec_formula(rows, sector_neutral, cons),
+        "formula": spec_formula(rows, sector_neutral, cons, combine_mode),
         "features": [{"feature": f, "transform": t, "weight": w} for f, t, w in rows],
         "constraints": [{"left": l, "op": o, "right": r} for l, o, r in cons],
         "sector_neutral": bool(sector_neutral),
+        "combine": combine_mode,
     },
     "universe": {
         "sectors": sel_sectors or "all",
