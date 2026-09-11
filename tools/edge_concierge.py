@@ -291,13 +291,14 @@ with st.container(border=True, key="step1"):
                                         index=_guess(("industry",)) + 1
                                         if any("industry" in c.lower() for c in cols) else 0)
 
+            _has_totret = any("totalreturn" in c.lower().replace(" ", "") for c in cols)
             _has_px = any(n in c.lower() for c in cols
-                          for n in ("price", "close", "px", "adj", "totalreturn"))
+                          for n in ("price", "close", "px", "adj"))
             ret_src = st.radio("Forward returns come from…", [
                 "A price column (computed at 1/3/6/12m)",
                 "A forward-return column",
                 "Join from base panel by ticker",
-            ], index=0 if _has_px else 2,
+            ], index=1 if _has_totret else (0 if _has_px else 2),
                 help="Your file needs a way to measure what happened next. If it "
                      "has neither prices nor forward returns, the last option "
                      "borrows them from the shipped S&P 500 panel — which only "
@@ -306,9 +307,10 @@ with st.container(border=True, key="step1"):
             join_base = False
             if ret_src.startswith("A price"):
                 price_col = st.selectbox("Price column", cols, index=_guess(
-                    ("totalreturn", "price", "close", "px", "adj")))
+                    ("price", "close", "px", "adj")))
             elif ret_src.startswith("A forward"):
-                fcol = st.selectbox("Forward-return column", cols)
+                fcol = st.selectbox("Forward-return column", cols,
+                                    index=_guess(("totalreturn",)))
                 fhor = st.selectbox("…measured over", list(FWD_COLS),
                                     format_func=HORIZON_LABELS.get)
                 fwd_map = {fhor: fcol}
