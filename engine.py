@@ -29,11 +29,21 @@ BENCH_COL = "Column"
 BENCH_REF = "Reference"
 
 
+OP_SUM = "+"
+OP_PRODUCT = "×"
+
+
 @dataclass
 class FeatureSpec:
     feature: str
     transform: str = "rank"   # rank | zscore | raw
     weight: float = 1.0
+    # how this row folds into the running total, left to right (no operator
+    # precedence — see build_composite). Meaningless for the first row, which
+    # only ever seeds the total, but every row still carries its own op so a
+    # row can be reordered or deleted without the table silently changing
+    # what an earlier row meant.
+    op: str = OP_SUM
 
 
 OPS = {">": operator.gt, ">=": operator.ge, "<": operator.lt, "<=": operator.le,
@@ -54,16 +64,11 @@ class Constraint:
     right: str = "0"
 
 
-COMBINE_SUM = "weighted sum"
-COMBINE_PRODUCT = "rank product"
-
-
 @dataclass
 class EdgeSpec:
     features: list[FeatureSpec] = field(default_factory=list)
     sector_neutral: bool = False   # transform within (date, sector) instead of (date)
     constraints: list[Constraint] = field(default_factory=list)
-    combine: str = COMBINE_SUM
 
 
 def feature_columns(panel: pd.DataFrame) -> list[str]:
@@ -142,41 +147,41 @@ def unresolved_constraints(panel: pd.DataFrame,
 
 
 def build_composite(panel: pd.DataFrame, spec: EdgeSpec) -> pd.Series:
-    """Weighted sum of cross-sectionally transformed features, re-ranked to [0,1].
+    """Fold each row's term into a running total, left to right, per its own op.
 
     Constraints are applied *first*, so ineligible names are absent from the
     cross-section the ranks are computed over — a screen changes the peer group,
     it does not merely mark rows after the fact.
+
+    A '+' row contributes weight * transform(feature) — a linear leg, added.
+    A '×' row contributes rank^|weight| (or (1-rank)^|weight| for a negative
+    weight) — a multiplicative leg, so a name has to score on it too; nothing
+    to compensate with. There is no operator precedence: rows fold in table
+    order, so 'A + B × C' means (A + B) × C, matching spec_formula's rendering.
     """
     keys = ["date", "sector"] if spec.sector_neutral else ["date"]
     eligible = constraint_mask(panel, spec.constraints)
-    parts = []
+    terms = []   # (op, term) in row order
     for fs in spec.features:
         if fs.weight == 0 or fs.feature not in panel.columns:
             continue
         col = panel[fs.feature].where(eligible)
         t = col.groupby([panel[k] for k in keys], observed=True).transform(
             _transform_group, how=fs.transform)
-        parts.append(fs.weight * t)
-    if not parts:
-        raise ValueError("Edge spec has no active features (all weights zero?).")
-
-    if spec.combine == COMBINE_PRODUCT:
-        # Layered composition: rank each leg, multiply. A name has to score on
-        # every layer, so a zero on one is not offset by a high score on
-        # another — the behaviour a weighted sum cannot express. Weight acts as
-        # an exponent; a negative weight inverts the leg to (1 - rank).
-        raw = None
-        for fs, t in zip([f for f in spec.features
-                          if f.weight != 0 and f.feature in panel.columns], parts):
-            leg = t / fs.weight                      # undo the weight scaling
-            leg = leg.clip(0, 1)
+        if fs.op == OP_PRODUCT:
+            leg = t.clip(0, 1)
             if fs.weight < 0:
                 leg = 1.0 - leg
-            leg = leg.clip(lower=1e-6) ** abs(fs.weight)
-            raw = leg if raw is None else raw * leg
-    else:
-        raw = sum(parts)
+            term = leg.clip(lower=1e-6) ** abs(fs.weight)
+        else:
+            term = fs.weight * t
+        terms.append((fs.op, term))
+    if not terms:
+        raise ValueError("Edge spec has no active features (all weights zero?).")
+
+    raw = terms[0][1]
+    for op, term in terms[1:]:
+        raw = raw * term if op == OP_PRODUCT else raw + term
     # re-rank the combined score within each date so quantile cuts are stable
     comp = raw.groupby(panel["date"]).transform(
         lambda s: (s.rank() - 1.0) / max(s.notna().sum() - 1.0, 1.0))

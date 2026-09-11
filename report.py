@@ -51,8 +51,9 @@ def build_report(sig: str, title: str, record: dict, figs_html: list[str],
     """
     r, sp, un, te = record["results"], record["spec"], record["universe"], record["test"]
     rows = "".join(
-        f"<tr><td><code>{f['feature']}</code></td><td>{f['transform']}</td>"
-        f"<td class='num'>{f['weight']:g}</td></tr>" for f in sp["features"])
+        f"<tr><td>{f.get('op', '+')}</td><td><code>{f['feature']}</code></td>"
+        f"<td>{f['transform']}</td><td class='num'>{f['weight']:g}</td></tr>"
+        for f in sp["features"])
     cons = "".join(
         f"<tr><td><code>{c['left']}</code></td><td>{c['op']}</td>"
         f"<td><code>{c['right']}</code></td></tr>" for c in sp["constraints"])
@@ -152,7 +153,7 @@ def build_report(sig: str, title: str, record: dict, figs_html: list[str],
 <h2>Charts</h2>{charts}
 <h2>Specification</h2>
 <div class="cols">
-  <div><table><tr><th>Feature</th><th>Transform</th><th>Weight</th></tr>
+  <div><table><tr><th></th><th>Feature</th><th>Transform</th><th>Weight</th></tr>
   {rows}</table>
   {"<table style='margin-top:12px'><tr><th>Constraint</th><th></th><th></th></tr>"
    + cons + "</table>" if cons else ""}</div>

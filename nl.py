@@ -18,6 +18,7 @@ class SpecRow(BaseModel):
     feature: str
     transform: str          # rank | zscore | raw
     weight: float
+    op: str = "+"            # '+' or '×' — how this row folds into the rows above it
 
 
 class PlanConstraint(BaseModel):
@@ -66,6 +67,28 @@ def plan_edge(description: str, features: list[str], sectors: list[str],
             "'log_mcap' with negative weight = small-cap tilt. "
             f"Available sectors: {', '.join(sectors)}. "
             "Use transform 'rank' unless the user asks for z-scores or raw values. "
+            "\n\n"
+            "Each row has an 'op' ('+' or '×') saying how it folds into the rows "
+            "*above* it, strictly top to bottom — there is no operator "
+            "precedence, so a table read as A(+) B(+) C(×) means (A + B) × C, "
+            "not A + (B × C). The first row's op is ignored (nothing precedes "
+            "it); default every other row to '+' unless the idea specifically "
+            "needs a leg that multiplies in rather than adds. "
+            "'+' rows add weight × transform(feature) — legs that trade off "
+            "against each other, a high one compensating a low one. Use this "
+            "for most ideas, including ones with several factors bundled "
+            "together as a weighted blend. "
+            "'×' rows multiply in rank^|weight| (or (1-rank)^|weight| when the "
+            "weight is negative) — the row has to score too, nothing "
+            "compensates for it. Reach for '×' only when the idea names a "
+            "condition that must hold on its own, separate from a blend of "
+            "preferences: e.g. 'cheap and profitable, but kill the position if "
+            "short interest is high' is (cheap + profitable) then a '×' row on "
+            "short_interest with negative weight — being cheap doesn't buy back "
+            "safety from crowded shorts. A phrase like '(60/40 combo of X and "
+            "Y) times -1 times Z' is exactly this shape: two '+' rows for X "
+            "(weight 0.6) and Y (weight 0.4), then one '×' row for Z with "
+            "weight -1. "
             "'sectors' is the list to INCLUDE: if the user excludes sectors, "
             "list all remaining ones; leave empty for no restriction. "
             "Default horizon fwd_1m unless the user implies a longer holding period. "
@@ -73,9 +96,10 @@ def plan_edge(description: str, features: list[str], sectors: list[str],
             "that fail: use them when the user states a threshold or a relationship "
             "('only profitable names' -> roa > 0; 'earning more than they are "
             "growing assets' -> roa > asset_gr). 'right' is either a number as a "
-            "string or another feature name. Prefer weights over constraints for "
-            "soft preferences — a constraint discards names entirely, so reach for "
-            "one only when the user means a genuine requirement. Empty list if none."
+            "string or another feature name. Prefer weights (and '×' rows) over "
+            "constraints for soft preferences — a constraint discards names "
+            "entirely, so reach for one only when the user means a genuine "
+            "requirement. Empty list if none."
         ),
         messages=[{"role": "user", "content": description}],
         output_format=EdgePlan,

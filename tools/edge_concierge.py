@@ -27,10 +27,10 @@ from data_io import (REFERENCE_LABELS, ambiguous_date, load_base_panel,
 from report import build_report as _build_report
 from ui import (BASELINE, BLUE, GRID, INK, INK_2, MUTED, RED, SURFACE,
                 ramp, style)
-from engine import (BENCH_COL, BENCH_REF, COMBINE_PRODUCT, COMBINE_SUM,
-                    FWD_COLS, OPS, TRANSFORMS, Constraint, EdgeSpec,
-                    FeatureSpec, benchmark_options, consistency_checks,
-                    feature_columns, run_edge)
+from engine import (BENCH_COL, BENCH_REF, FWD_COLS, OP_PRODUCT, OP_SUM, OPS,
+                    TRANSFORMS, Constraint, EdgeSpec, FeatureSpec,
+                    benchmark_options, consistency_checks, feature_columns,
+                    run_edge)
 
 # Palette and chart styling live in ui.py, shared with the other tool.
 
@@ -50,10 +50,10 @@ HORIZON_LABELS = {"fwd_1m": "1 month", "fwd_3m": "3 months",
 # Communication Services is dropped because it is the one sector where the
 # signal genuinely fails (IC -0.003).
 EXAMPLE_ROWS = [
-    {"feature": "fcf_yield", "transform": "rank", "weight": 1.0},    # value
-    {"feature": "gpa",       "transform": "rank", "weight": 0.5},    # quality
-    {"feature": "accruals",  "transform": "rank", "weight": -0.5},   # safety
-    {"feature": "asset_gr",  "transform": "rank", "weight": -0.5},   # discipline
+    {"feature": "fcf_yield", "transform": "rank", "weight": 1.0, "op": OP_SUM},   # value
+    {"feature": "gpa",       "transform": "rank", "weight": 0.5, "op": OP_SUM},   # quality
+    {"feature": "accruals",  "transform": "rank", "weight": -0.5, "op": OP_SUM},  # safety
+    {"feature": "asset_gr",  "transform": "rank", "weight": -0.5, "op": OP_SUM},  # discipline
 ]
 EXAMPLE_SECTORS = ["Consumer Cyclical", "Consumer Defensive"]
 EXAMPLE_CONSTRAINTS = [{"left": "mom_6_1", "op": ">", "right": "0"}]
@@ -66,7 +66,8 @@ def default_builder_rows(features: list[str]) -> pd.DataFrame:
     """The example spec, minus any feature this panel doesn't have."""
     rows = [r for r in EXAMPLE_ROWS if r["feature"] in features]
     if not rows:   # custom CSV with its own columns
-        rows = [{"feature": features[0], "transform": "rank", "weight": 1.0}]
+        rows = [{"feature": features[0], "transform": "rank", "weight": 1.0,
+                 "op": OP_SUM}]
     return pd.DataFrame(rows)
 
 
@@ -200,12 +201,12 @@ ENGINE_SIG = hashlib.md5(
 def cached_run(engine_sig: str, panel_key: str, panel: pd.DataFrame,
                spec_rows: tuple, sector_neutral: bool, horizon: str, n_q: int,
                bench_mode: str, bench_col: str | None,
-               bench_ref: str | None, cons_rows: tuple = (),
-               combine: str = COMBINE_SUM) -> dict:
+               bench_ref: str | None, cons_rows: tuple = ()) -> dict:
+    # each row already carries its own op (+ / ×), so the fold order is
+    # fully determined by spec_rows itself — nothing global to pass in
     spec = EdgeSpec(features=[FeatureSpec(*r) for r in spec_rows],
                     sector_neutral=sector_neutral,
-                    constraints=[Constraint(*c) for c in cons_rows],
-                    combine=combine)
+                    constraints=[Constraint(*c) for c in cons_rows])
     # built here, not passed in, so the cache key stays a short string
     series = reference_series(bench_ref, panel["date"]) if bench_ref else None
     return run_edge(panel, spec, horizon=horizon, n_q=n_q,
@@ -404,30 +405,47 @@ if not set(st.session_state["builder"]["feature"].dropna()) & set(features):
     # none of the stored rows exist in this panel (panel was switched) — reset
     st.session_state["builder"] = default_builder_rows(features)
     st.session_state.pop("builder_editor", None)
+if "op" not in st.session_state["builder"].columns:
+    # a session started before the per-row operator existed — every row was
+    # an implicit weighted sum, so that's the safe backfill
+    st.session_state["builder"]["op"] = OP_SUM
+
+
+def _row_term(feat: str, tr: str, w: float, op: str) -> str:
+    """This row's own contribution, independent of how it joins the total."""
+    term = feat if tr == "raw" else f"{tr}({feat})"
+    if op == OP_PRODUCT:
+        # weight is an exponent here, not a coefficient — negative inverts
+        # the leg to (1 - rank), matching build_composite's product branch.
+        base = f"(1−{term})" if w < 0 else term
+        exp = "" if abs(w) == 1 else f"^{abs(w):g}"
+        return f"{base}{exp}"
+    coef = "" if abs(w) == 1 else f"{abs(w):g}·"
+    return f"{coef}{term}"
 
 
 def spec_formula(rows: list[tuple], sector_neutral: bool,
-                 cons: list[tuple] | None = None,
-                 combine: str = COMBINE_SUM) -> str:
-    if combine == COMBINE_PRODUCT:
-        # each leg is rank(feature)^|weight|, or (1-rank)^|weight| when the
-        # weight is negative — weight acts as an exponent here, not a
-        # coefficient, matching build_composite's product branch.
-        parts = []
-        for feat, tr, w in rows:
-            term = feat if tr == "raw" else f"{tr}({feat})"
-            base = f"(1−{term})" if w < 0 else term
-            exp = "" if abs(w) == 1 else f"^{abs(w):g}"
-            parts.append(f"{base}{exp}")
-        out = "edge = " + " × ".join(parts)
-    else:
-        parts = []
-        for i, (feat, tr, w) in enumerate(rows):
-            term = feat if tr == "raw" else f"{tr}({feat})"
-            coef = "" if abs(w) == 1 else f"{abs(w):g}·"
-            sign = ("−" if w < 0 else "") if i == 0 else (" − " if w < 0 else " + ")
-            parts.append(f"{sign}{coef}{term}")
-        out = "edge = " + "".join(parts)
+                 cons: list[tuple] | None = None) -> str:
+    """
+    Render the left-to-right fold each row's op builds in build_composite.
+
+    No operator precedence: 'A + B × C' means (A + B) × C, not A + (B × C).
+    Parens only appear where the running total's own top-level operator
+    differs from the one about to apply — a pure +-chain or ×-chain never
+    gets any, matching the old single-mode formulas exactly.
+    """
+    expr, last_op = None, None
+    for i, (feat, tr, w, op) in enumerate(rows):
+        term = _row_term(feat, tr, w, op)
+        if i == 0:
+            expr = f"−{term}" if (op != OP_PRODUCT and w < 0) else term
+            continue
+        if last_op is not None and op != last_op:
+            expr = f"({expr})"
+        joiner = " × " if op == OP_PRODUCT else (" − " if w < 0 else " + ")
+        expr = f"{expr}{joiner}{term}"
+        last_op = op
+    out = "edge = " + (expr or "")
     if cons:
         out += "   where " + " and ".join(f"{l} {o} {r}" for l, o, r in cons)
     if sector_neutral:
@@ -439,7 +457,7 @@ def run_title(rows: list[tuple], horizon: str, n_q: int, stamp: datetime) -> str
     """A short human title: the heaviest legs, the horizon, the ntile count."""
     top = sorted(rows, key=lambda r: -abs(r[2]))[:3]
     legs = "".join(("−" if w < 0 else ("" if i == 0 else "+")) + f
-                   for i, (f, _, w) in enumerate(top))
+                   for i, (f, _, w, *_) in enumerate(top))
     if len(rows) > len(top):
         legs += f"+{len(rows) - len(top)} more"
     return f"{legs} · {HORIZON_LABELS[horizon]} · {n_q} ntiles · {stamp:%Y-%m-%d %H:%M}"
@@ -448,7 +466,7 @@ def run_title(rows: list[tuple], horizon: str, n_q: int, stamp: datetime) -> str
 def run_slug(rows: list[tuple], horizon: str, stamp: datetime) -> str:
     """Filesystem-safe filename stem. Bounded length, no collisions per second."""
     top = sorted(rows, key=lambda r: -abs(r[2]))[:3]
-    parts = "-".join(re.sub(r"[^0-9a-zA-Z]+", "", f) for f, _, _ in top) or "edge"
+    parts = "-".join(re.sub(r"[^0-9a-zA-Z]+", "", f) for f, *_ in top) or "edge"
     return f"{stamp:%Y%m%d-%H%M%S}_{parts[:60]}_{horizon.replace('fwd_', '')}"
 
 
@@ -512,7 +530,10 @@ def live_rows() -> list[tuple]:
         base = base.drop(index=[i for i in state["deleted_rows"]
                                 if i in base.index])
     base = base.dropna(subset=["feature", "transform", "weight"])
-    return [(r.feature, r.transform, float(r.weight))
+    # a freshly added row can have its op cell still unset in the editor delta
+    base["op"] = base.get("op", OP_SUM)
+    base["op"] = base["op"].fillna(OP_SUM)
+    return [(r.feature, r.transform, float(r.weight), r.op)
             for r in base.itertuples() if r.weight != 0]
 
 
@@ -576,14 +597,13 @@ with st.container(border=True, key="step2"):
             c_btn, c_formula = st.columns([1, 4], vertical_alignment="center")
             cur = live_rows()
             if cur:
-                # drawn above the sector-neutral toggle and combine selector,
-                # so read session state rather than the not-yet-assigned names
+                # drawn above the sector-neutral toggle, so read session state
+                # rather than the not-yet-assigned name
                 _neutral = st.session_state.get("neutral_w", False)
-                _combine = st.session_state.get("combine_w", COMBINE_SUM)
-                _f = spec_formula(cur, _neutral, live_constraints(), _combine)
+                _f = spec_formula(cur, _neutral, live_constraints())
                 # the placeholder disappears the moment they type, so mark the
                 # formula too — otherwise the sample silently reads as theirs
-                _sample_rows = [(r["feature"], r["transform"], r["weight"])
+                _sample_rows = [(r["feature"], r["transform"], r["weight"], r["op"])
                                 for r in EXAMPLE_ROWS]
                 _sample_cons = [(c["left"], c["op"], c["right"])
                                 for c in EXAMPLE_CONSTRAINTS]
@@ -708,7 +728,19 @@ with st.container(border=True, key="step4"):
     edited = st.columns([5, 1])[0].data_editor(
         st.session_state["builder"],
         num_rows="dynamic", width="stretch", hide_index=True,
+        column_order=["op", "feature", "transform", "weight"],
         column_config={
+            "op": st.column_config.SelectboxColumn(
+                "Join", options=[OP_SUM, OP_PRODUCT], required=True,
+                default=OP_SUM, width="small",
+                help="How this row folds into the running total of every row "
+                     "*above* it, top to bottom — no operator precedence, so "
+                     "`A + B × C` means `(A + B) × C`. Ignored on the first "
+                     "row, which just seeds the total. **+** adds "
+                     "weight·transform(feature) (compensates). **×** "
+                     "multiplies in rank^|weight|, or (1−rank)^|weight| for a "
+                     "negative weight (nothing to compensate with — the row "
+                     "has to score too)."),
             "feature": st.column_config.SelectboxColumn(
                 "Feature", options=features, required=True, width="medium"),
             "transform": st.column_config.SelectboxColumn(
@@ -721,24 +753,16 @@ with st.container(border=True, key="step4"):
         key="builder_editor",
     )
 
-    rows = [(r.feature, r.transform, float(r.weight))
+    edited["op"] = edited.get("op", OP_SUM)
+    edited["op"] = edited["op"].fillna(OP_SUM)
+    rows = [(r.feature, r.transform, float(r.weight), r.op)
             for r in edited.dropna(subset=["feature", "weight"]).itertuples()
             if r.weight != 0]
 
-    _c_neutral, _c_combine = st.columns([3, 2])
-    sector_neutral = _c_neutral.toggle(
+    sector_neutral = st.columns([3, 2])[0].toggle(
         "Sector-neutral (transform within sector)", key="neutral_w",
         help="Rank each name against its own sector rather than the whole "
              "cross-section — strips the sector bet out of the edge.")  # part of how the composite is built, not how it is scored
-    combine_mode = _c_combine.selectbox(
-        "Combine", [COMBINE_SUM, COMBINE_PRODUCT], key="combine_w",
-        help="**Weighted sum** — legs add, so a high score on one leg "
-             "compensates a low score on another. **Rank product** — legs "
-             "multiply (rank^|weight|, or (1−rank)^|weight| for a negative "
-             "weight), so a name has to score on every leg at once; nothing "
-             "to compensate with. Reach for product when the legs are "
-             "conditions that all need to hold, not preferences that trade "
-             "off against each other.")
 
 
 
@@ -849,8 +873,7 @@ if _cut is not None:
 
 def _score(sub):
     return cached_run(ENGINE_SIG, panel_key, sub, tuple(rows), sector_neutral,
-                      horizon, n_q, bench_mode, bench_col, bench_ref,
-                      tuple(cons), combine_mode)
+                      horizon, n_q, bench_mode, bench_col, bench_ref, tuple(cons))
 
 res = _score(SAMPLES[sample])
 
@@ -911,13 +934,12 @@ if _cut is not None and IN_SAMPLE in _opts and OUT_SAMPLE in _opts:
                    "effect, not a weaker one.")
         if _nl_key:
             _vkey = (checks["verdict"], checks["passed"],
-                     spec_formula(rows, sector_neutral, cons, combine_mode))
+                     spec_formula(rows, sector_neutral, cons))
             if st.session_state.get("_vnote_key") != _vkey:
                 try:
                     with st.spinner("Reading the validation…"):
                         st.session_state["_vnote"] = explain_validation(
-                            checks, spec_formula(rows, sector_neutral, cons,
-                                                 combine_mode),
+                            checks, spec_formula(rows, sector_neutral, cons),
                             _nl_key)
                     st.session_state["_vnote_key"] = _vkey
                 except Exception as e:
@@ -965,7 +987,7 @@ colors = ramp(n_q)   # shared by the on-screen tabs and the saved report
 # can actually be cached instead of rebuilt on every widget interaction.
 _sig = json.dumps([rows, cons, sel_sectors, sel_industries, list(yr_range),
                    horizon, int(n_q), bench_label, bool(sector_neutral),
-                   combine_mode, panel_key, ENGINE_SIG], default=str, sort_keys=True)
+                   panel_key, ENGINE_SIG], default=str, sort_keys=True)
 _stamp = st.session_state.setdefault("_run_stamps", {}).setdefault(
     _sig, datetime.now())
 _title = run_title(rows, horizon, n_q, _stamp)
@@ -976,11 +998,11 @@ record = {
     "exported_at": _stamp.isoformat(timespec="seconds"),
     "panel": BASE_PANEL_LABEL if panel_key == "base" else "custom upload",
     "spec": {
-        "formula": spec_formula(rows, sector_neutral, cons, combine_mode),
-        "features": [{"feature": f, "transform": t, "weight": w} for f, t, w in rows],
+        "formula": spec_formula(rows, sector_neutral, cons),
+        "features": [{"feature": f, "transform": t, "weight": w, "op": o}
+                     for f, t, w, o in rows],
         "constraints": [{"left": l, "op": o, "right": r} for l, o, r in cons],
         "sector_neutral": bool(sector_neutral),
-        "combine": combine_mode,
     },
     "universe": {
         "sectors": sel_sectors or "all",
