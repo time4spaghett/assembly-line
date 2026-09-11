@@ -292,7 +292,7 @@ with st.container(border=True, key="step1"):
                                         if any("industry" in c.lower() for c in cols) else 0)
 
             _has_px = any(n in c.lower() for c in cols
-                          for n in ("price", "close", "px", "adj"))
+                          for n in ("price", "close", "px", "adj", "totalreturn"))
             ret_src = st.radio("Forward returns come from…", [
                 "A price column (computed at 1/3/6/12m)",
                 "A forward-return column",
@@ -306,7 +306,7 @@ with st.container(border=True, key="step1"):
             join_base = False
             if ret_src.startswith("A price"):
                 price_col = st.selectbox("Price column", cols, index=_guess(
-                    ("price", "close", "px", "adj")))
+                    ("totalreturn", "price", "close", "px", "adj")))
             elif ret_src.startswith("A forward"):
                 fcol = st.selectbox("Forward-return column", cols)
                 fhor = st.selectbox("…measured over", list(FWD_COLS),

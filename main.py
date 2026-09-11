@@ -63,6 +63,11 @@ st.markdown(f"""<style>
 }}
 .stAlert {{border-radius:0 !important;}}
 
+/* the sketch box's native "Press Ctrl+Enter to apply" hint just commits the
+   text into session state — it doesn't run the draft, so it reads as a
+   broken shortcut. Hidden in favour of the Draft spec button. */
+.st-key-step2 [data-testid="InputInstructions"] {{display:none;}}
+
 /* tabs: a rule, underlined where you are */
 .stTabs [data-baseweb="tab-list"] {{gap:1.4rem; border-bottom:1px solid #d9d9d2;}}
 .stTabs [data-baseweb="tab-highlight"] {{background:{INK};}}
