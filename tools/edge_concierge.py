@@ -997,8 +997,8 @@ record = {
         "ls_sharpe": _num(res["ls_sharpe"]),
         "ls_ann_return": _num(res["ls_ann_ret"]),
         "ls_ann_vol": _num(res["ls_ann_vol"]),
-        "ntile_ann_arithmetic": {f"Q{int(q)}": _num(v)
-                                 for q, v in res["q_ann_returns"].items()},
+        "ntile_ann_geometric": {f"Q{int(q)}": _num(v)
+                                for q, v in res["q_ann_returns"].items()},
         "ntile_cagr": {f"Q{int(q)}": _num(v) for q, v in res["q_cagr"].items()},
         "benchmark_ann": _num(res["bench_ann"]),
         "benchmark_cagr": _num(res["bench_cagr"]),
@@ -1058,9 +1058,12 @@ if len(res["sector_ic"]):
                      + _rows + "</table>")
 
 _caveats = [
-    "Ntile bars are the <i>arithmetic</i> mean of overlapping windows — what the "
-    "signal predicts. They sit above the compounded CAGR beside them by roughly "
-    "half the variance, widest for the most volatile ntile.",
+    "Ntile bars are the <i>geometric</i> mean of overlapping windows, annualized — "
+    "what the signal predicts at this horizon. They can still differ from the "
+    "compounded CAGR beside them: that number answers a different question — "
+    "one realized path, once — while the bars average every overlapping "
+    "h-month window, so the two agree closely at 1 month and diverge somewhat "
+    "at longer horizons.",
     "Cumulative and long–short curves always use non-overlapping 1-month returns, "
     "so they do not change with the return horizon.",
     "The Newey-West t-stat corrects for the overlap that horizons beyond one "
@@ -1112,14 +1115,15 @@ with tab_nt:
         st.plotly_chart(fig_ntile_bars(res, colors, hl, bench_label),
                         width="stretch")
         st.caption(
-            f"Average {hl} forward return per ntile, annualized — Q1 = lowest "
-            f"composite score, top ntile = highest. Dashed line is "
+            f"Geometric mean {hl} forward return per ntile, annualized — Q1 = "
+            f"lowest composite score, top ntile = highest. Dashed line is "
             f"**{bench_label}** at **{res['bench_ann']:+.1%}**, measured the same "
-            f"way, so a ntile only adds value by clearing it. This is the "
-            f"*arithmetic* mean of overlapping {hl} windows: it answers \"what "
-            f"does the signal predict\", and runs above the compounded number "
-            f"beside it by roughly half the variance. For what an investor "
-            f"actually earns, read the curve →")
+            f"way, so a ntile only adds value by clearing it. This answers "
+            f"\"what does the signal predict at a {hl} hold\", averaged across "
+            f"every overlapping {hl} window — closely tracks the compounded "
+            f"number beside it at a 1-month horizon, diverging somewhat at "
+            f"longer ones since it is a different question, not a biased "
+            f"version of the same one. For the realized path, read the curve →")
     with c2:
         st.plotly_chart(fig_ntile_curves(res, colors, bench_label), width="stretch")
         _q = res["q_cagr"]
@@ -1127,10 +1131,10 @@ with tab_nt:
             f"Compounded growth of $1 per ntile — equal-weight within ntile, "
             f"monthly rebalance, gross of costs. Top ntile compounds at "
             f"**{_q.iloc[-1]:+.1%}/yr** vs **{_q.iloc[0]:+.1%}** for the bottom "
-            f"and **{res['bench_cagr']:+.1%}** for {bench_label} — lower than the "
-            f"bars because compounding penalises volatility. Always built from "
-            f"non-overlapping 1-month returns, so the horizon selector does not "
-            f"move this chart.")
+            f"and **{res['bench_cagr']:+.1%}** for {bench_label} — one realized "
+            f"path, once, so it does not move with the horizon selector, unlike "
+            f"the bars beside it. Always built from non-overlapping 1-month "
+            f"returns.")
 
 with tab_ls:
     _f = fig_long_short(res)

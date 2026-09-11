@@ -59,7 +59,7 @@ def build_report(sig: str, title: str, record: dict, figs_html: list[str],
     ntiles = "".join(
         f"<tr><td>{q}</td><td class='num'>{_fmt_pct(v)}</td>"
         f"<td class='num'>{_fmt_pct(r['ntile_cagr'].get(q))}</td></tr>"
-        for q, v in r["ntile_ann_arithmetic"].items())
+        for q, v in r["ntile_ann_geometric"].items())
     screen = record.get("screen")
     screen_html = ""
     if screen:

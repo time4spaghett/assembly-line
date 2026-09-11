@@ -252,6 +252,22 @@ def _h_forward(monthly: pd.Series, h: int) -> pd.Series:
     return np.expm1(fwd)
 
 
+def _geo_ann(x, months: int):
+    """
+    Geometric-mean annualization of a per-date h-month return series (or
+    DataFrame of them, one column per quantile).
+
+    Averaging period returns arithmetically and then compounding the average
+    — (1 + mean(r)) ** (12/h) — 1 — overstates the annualized figure by
+    roughly half the return variance (AM ≥ GM). Taking the geometric mean
+    across dates first removes that inflation while staying horizon-
+    dependent: unlike a realized CAGR, this still answers "what does an
+    h-month hold average to", so the horizon selector keeps doing something.
+    """
+    g = np.exp(np.log1p(x).mean()) - 1.0
+    return (1.0 + g) ** (12.0 / months) - 1.0
+
+
 def benchmark_options(panel: pd.DataFrame) -> list[str]:
     """Benchmark choices available for this panel."""
     opts = [BENCH_EW]
@@ -279,10 +295,10 @@ def quantile_analysis(panel: pd.DataFrame, comp: pd.Series, horizon: str,
     df = df.dropna(subset=["q"])
     df["q"] = df["q"].astype(int)
 
-    # mean fwd return per quantile per date, then averaged across dates
+    # mean fwd return per quantile per date, then annualized geometrically
+    # across dates (see _geo_ann) rather than arithmetically
     by_dq = df.groupby(["date", "q"])["fwd"].mean().unstack()
-    q_mean = by_dq.mean()
-    q_ann = (1.0 + q_mean) ** (12.0 / months) - 1.0
+    q_ann = _geo_ann(by_dq, months)
 
     # per-quantile monthly (non-overlapping 1m fwd) return series → cumulative curves
     by_dq1 = df.groupby(["date", "q"])["fwd1"].mean().unstack()
@@ -320,7 +336,7 @@ def quantile_analysis(panel: pd.DataFrame, comp: pd.Series, horizon: str,
         bench_span = months
     bench = bench.reindex(q_cum.index)
     bench_cum = (1.0 + bench).cumprod()
-    bench_ann = (1.0 + float(bench_h.mean())) ** (12.0 / bench_span) - 1.0
+    bench_ann = float(_geo_ann(bench_h, bench_span))
 
     # long-short series on non-overlapping 1m returns (honest cumulative curve)
     ls = (by_dq1[n_q] - by_dq1[1]).dropna() if n_q in by_dq1 and 1 in by_dq1 else pd.Series(dtype=float)
