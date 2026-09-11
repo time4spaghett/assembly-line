@@ -319,11 +319,13 @@ with st.container(border=True, key="step1"):
                            "rest as (none) and those horizons just won't be "
                            "selectable in Test setup.")
                 opt2 = ["(none)"] + cols
+                # matched against _norm(column) below, which strips every
+                # separator — so these tokens stay separator-free too
                 _fwd_tokens = {
-                    "fwd_1m": ("totalreturn", "fwdreturn1m", "fwd1m", "return1m"),
-                    "fwd_3m": ("fwdreturn3m", "fwd3m", "return3m"),
-                    "fwd_6m": ("fwdreturn6m", "fwd6m", "return6m"),
-                    "fwd_12m": ("fwdreturn12m", "fwd12m", "return12m"),
+                    "fwd_1m": ("totalreturn",),
+                    "fwd_3m": ("fwdreturn3m",),
+                    "fwd_6m": ("fwdreturn6m",),
+                    "fwd_12m": ("fwdreturn12m",),
                 }
                 fwd_map = {}
                 for h in FWD_COLS:
