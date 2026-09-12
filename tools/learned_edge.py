@@ -111,7 +111,23 @@ work = raw.copy()
 work["date"] = pd.to_datetime(work[date_col], errors="coerce")
 work = work.dropna(subset=["date"])
 work["_target"] = pd.to_numeric(work[target_col], errors="coerce")
+_before = len(work)
 work = work.dropna(subset=["_target"] + features)
+_kept_frac = len(work) / _before if _before else 1.0
+if _kept_frac < 0.95:
+    # a listwise dropna across every selected feature at once compounds fast —
+    # 20 features each 90% populated independently keeps only ~12% of rows,
+    # and with nothing surfacing that, a bad fit reads as "no signal" rather
+    # than "most of the panel just got dropped before fitting ever started"
+    _miss = (raw[features].isna().mean().sort_values(ascending=False) * 100).round(1)
+    _worst = ", ".join(f"`{f}` {p:.0f}% missing" for f, p in _miss.head(5).items() if p > 0)
+    st.warning(
+        f"Selected features dropped **{_before - len(work):,} of {_before:,} rows** "
+        f"({1 - _kept_frac:.0%}) to missing values before any fit runs — only "
+        f"**{len(work):,}** remain. Sparsest features: {_worst or 'none'}. "
+        f"Deselect a sparse one above if this is more attrition than you expect; "
+        f"a fit on a starved, possibly biased survivor sample can look like "
+        f"'no signal' when the real problem is the feature list.")
 if sector_col != "(none)":
     work["sector"] = work[sector_col]
 
