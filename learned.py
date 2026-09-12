@@ -210,6 +210,185 @@ def build_learned_style_panel(
         pooled_auc=pooled, features=list(features), skipped=skipped)
 
 
+# ── Returns-based style analysis (Sharpe-style) ──────────────────────────────
+# The same question as the classifier — what is this manager's style — but
+# inferred from returns instead of characteristics. Each month the manager's
+# implied return (held names) is regressed on each factor's long-short return
+# within the universe; the loadings are the factor mix that best replicates
+# the manager. Ridge rather than OLS: factor L/S series are collinear, and
+# with ~200 months and a dozen factors unconstrained betas swing fold to fold
+# and read as noise. Sharpe's sum-to-one / non-negative constraints do not
+# apply here — the regressors are L/S legs, not long-only asset classes, so a
+# negative loading is a real answer.
+
+from sklearn.linear_model import RidgeCV
+
+RIDGE_ALPHAS = np.logspace(-3, 2, 24)
+MIN_TRAIN_MONTHS = 24
+
+
+def factor_ls_returns(df: pd.DataFrame, features: list, ret_col: str,
+                      date_col: str = "date", n_q: int = 5) -> pd.DataFrame:
+    """
+    Top-ntile minus bottom-ntile return per feature per date, equal-weight.
+
+    A date needs at least n_q*5 names with both the feature and the return
+    present (the same floor the Concierge's ntile cutter uses); otherwise that
+    factor is NaN on that date rather than cut from too few names.
+    """
+    out = {}
+    g = df.groupby(date_col)
+    for f in features:
+        vals = {}
+        for d, sub in g:
+            s = sub[[f, ret_col]].dropna()
+            if len(s) < n_q * 5:
+                vals[d] = np.nan
+                continue
+            q = pd.qcut(s[f].rank(method="first"), n_q, labels=False)
+            vals[d] = float(s.loc[q == n_q - 1, ret_col].mean()
+                            - s.loc[q == 0, ret_col].mean())
+        out[f] = pd.Series(vals)
+    return pd.DataFrame(out).sort_index()
+
+
+def manager_returns(df: pd.DataFrame, target: str, ret_col: str,
+                    date_col: str = "date", weight_col=None) -> pd.Series:
+    """Return of the held names each date — weighted if a weight column is given."""
+    held = df[df[target] == 1].dropna(subset=[ret_col])
+    if weight_col:
+        held = held.dropna(subset=[weight_col])
+        w = held[weight_col].astype(float).clip(lower=0)
+        num = (held[ret_col] * w).groupby(held[date_col]).sum()
+        den = w.groupby(held[date_col]).sum()
+        return (num / den.replace(0, np.nan)).sort_index()
+    return held.groupby(date_col)[ret_col].mean().sort_index()
+
+
+@dataclass
+class StyleFold:
+    train_end: pd.Timestamp
+    test_end: pd.Timestamp
+    n_train: int          # months
+    n_test: int
+    oos_corr: float
+    oos_r2: float
+    alpha_ann: float      # intercept, annualized — return the factors don't explain
+
+
+@dataclass
+class StyleResult:
+    manager: pd.Series                # actual manager return per month
+    replicated: pd.Series             # OOS replicated return, NaN before coverage
+    factor_returns: pd.DataFrame      # the L/S legs, months × features
+    folds: pd.DataFrame
+    loadings_by_fold: pd.DataFrame    # folds × features (raw-unit betas)
+    loadings: pd.Series               # time-averaged across folds
+    pooled_corr: float
+    pooled_r2: float
+    features: list = field(default_factory=list)
+    skipped: list = field(default_factory=list)
+
+
+def _ridge_fit(X: pd.DataFrame, y: pd.Series):
+    """Ridge on standardized regressors; returns raw-unit betas + intercept."""
+    scaler = StandardScaler().fit(X)
+    Xs = scaler.transform(X)
+    m = RidgeCV(alphas=RIDGE_ALPHAS).fit(Xs, y)
+    beta = pd.Series(m.coef_ / scaler.scale_, index=X.columns)
+    intercept = float(m.intercept_ - (beta * scaler.mean_).sum())
+    return beta, intercept
+
+
+def _design(df, features, target, ret_col, date_col, weight_col, n_q):
+    fr = factor_ls_returns(df, features, ret_col, date_col, n_q)
+    mr = manager_returns(df, target, ret_col, date_col, weight_col)
+    skipped = []
+    # a factor missing on many dates would drag every other factor's months
+    # down with it in a listwise drop — cut it instead, and say so
+    sparse = fr.columns[fr.isna().mean() > 0.25].tolist()
+    for f in sparse:
+        skipped.append(f"{f}: L/S leg missing on "
+                       f"{fr[f].isna().mean():.0%} of months, dropped")
+    fr = fr.drop(columns=sparse)
+    X = fr.dropna()
+    y = mr.reindex(X.index).dropna()
+    X = X.loc[y.index]
+    return X, y, fr, mr, skipped
+
+
+def walk_forward_style(df: pd.DataFrame, features: list, target: str,
+                       ret_col: str, date_col: str = "date", weight_col=None,
+                       n_q: int = 5, init_train_years: int = INIT_TRAIN_YEARS,
+                       step_years: int = STEP_YEARS, progress=None) -> StyleResult:
+    """
+    Expanding-window, out-of-sample style regression.
+
+    Each fold: fit loadings on all months strictly before train_end, then
+    replicate the following step_years window with those loadings. Every
+    replicated month comes from a fit that never saw it.
+    """
+    X, y, fr, mr, skipped = _design(df, features, target, ret_col, date_col,
+                                    weight_col, n_q)
+    replicated = pd.Series(np.nan, index=y.index, dtype=float)
+    rows, betas = [], []
+    windows = list(_fold_windows(pd.Series(y.index), init_train_years, step_years))
+    for i, (train_end, test_end) in enumerate(windows):
+        if progress:
+            progress(i / max(len(windows), 1), f"fold to {train_end:%Y}")
+        tr = y.index < train_end
+        te = (y.index >= train_end) & (y.index < test_end)
+        if tr.sum() < MIN_TRAIN_MONTHS:
+            skipped.append(f"{train_end:%Y}: only {int(tr.sum())} training months")
+            continue
+        if not te.any():
+            skipped.append(f"{train_end:%Y}: no months in the test window")
+            continue
+        beta, b0 = _ridge_fit(X[tr], y[tr])
+        yhat = X[te] @ beta + b0
+        replicated[te] = yhat.values
+        yt = y[te]
+        corr = float(np.corrcoef(yt, yhat)[0, 1]) if len(yt) > 2 else np.nan
+        sst = float(((yt - yt.mean()) ** 2).sum())
+        r2 = float(1 - ((yt - yhat) ** 2).sum() / sst) if sst > 0 else np.nan
+        rows.append(StyleFold(train_end, test_end, int(tr.sum()), int(te.sum()),
+                              corr, r2, b0 * 12))
+        betas.append(beta.rename(train_end))
+
+    scored = replicated.notna()
+    if scored.sum() > 2:
+        ys, yh = y[scored], replicated[scored]
+        pooled_corr = float(np.corrcoef(ys, yh)[0, 1])
+        pooled_r2 = float(1 - ((ys - yh) ** 2).sum() / ((ys - ys.mean()) ** 2).sum())
+    else:
+        pooled_corr = pooled_r2 = np.nan
+    lb = pd.DataFrame(betas) if betas else pd.DataFrame(columns=X.columns)
+    return StyleResult(
+        manager=y, replicated=replicated, factor_returns=fr,
+        folds=pd.DataFrame([f.__dict__ for f in rows]),
+        loadings_by_fold=lb,
+        loadings=(lb.mean().sort_values(key=abs, ascending=False)
+                  if len(lb) else pd.Series(dtype=float)),
+        pooled_corr=pooled_corr, pooled_r2=pooled_r2,
+        features=list(X.columns), skipped=skipped)
+
+
+def full_history_style(df: pd.DataFrame, features: list, target: str,
+                       ret_col: str, date_col: str = "date", weight_col=None,
+                       n_q: int = 5) -> dict:
+    """Fit once on every month, to describe the style. In-sample; never scored from."""
+    X, y, _, _, skipped = _design(df, features, target, ret_col, date_col,
+                                  weight_col, n_q)
+    if len(y) < MIN_TRAIN_MONTHS:
+        return {"loadings": pd.Series(dtype=float), "r2": np.nan,
+                "alpha_ann": np.nan, "n_months": int(len(y)), "skipped": skipped}
+    beta, b0 = _ridge_fit(X, y)
+    yhat = X @ beta + b0
+    r2 = float(1 - ((y - yhat) ** 2).sum() / ((y - y.mean()) ** 2).sum())
+    return {"loadings": beta.sort_values(key=abs, ascending=False), "r2": r2,
+            "alpha_ann": b0 * 12, "n_months": int(len(y)), "skipped": skipped}
+
+
 # ── What the model actually keys on, over the whole history ──────────────────
 # The walk-forward exists to produce honest scores; it is a poor lens on what
 # the model learned, because each fold sees a different slice. For a picture of
