@@ -212,137 +212,148 @@ def build_learned_style_panel(
 
 # ── Returns-based style analysis (Sharpe-style) ──────────────────────────────
 # The same question as the classifier — what is this manager's style — but
-# inferred from returns instead of characteristics. Each month the manager's
-# implied return (held names) is regressed on each factor's long-short return
-# within the universe; the loadings are the factor mix that best replicates
-# the manager. Ridge rather than OLS: factor L/S series are collinear, and
-# with ~200 months and a dozen factors unconstrained betas swing fold to fold
-# and read as noise. Sharpe's sum-to-one / non-negative constraints do not
-# apply here — the regressors are L/S legs, not long-only asset classes, so a
-# negative loading is a real answer.
+# inferred from returns instead of holdings. Two inputs: the manager's return
+# series, and a stock x date panel (features + fwd_1m) the factor legs are
+# built from — one long-short leg per feature via the Concierge's own engine,
+# plus the equal-weight universe as a market leg so beta is not smeared into
+# the factor loadings. Each month the manager is regressed on the legs; the
+# loadings are the factor mix that best replicates it. Ridge rather than OLS:
+# the legs are collinear, and with ~200 months and a dozen factors
+# unconstrained betas swing fold to fold and read as noise. Sharpe's
+# sum-to-one / non-negative constraints do not apply — the regressors are L/S
+# legs, not long-only asset classes, so a negative loading is a real answer.
 
 from sklearn.linear_model import RidgeCV
 
 RIDGE_ALPHAS = np.logspace(-3, 2, 24)
 MIN_TRAIN_MONTHS = 24
+MARKET_LEG = "market"
 
 
-def factor_ls_returns(df: pd.DataFrame, features: list, ret_col: str,
-                      date_col: str = "date", n_q: int = 5) -> pd.DataFrame:
+def factor_legs(panel: pd.DataFrame, features: list, n_q: int = 5,
+                sector_neutral: bool = False, progress=None) -> pd.DataFrame:
     """
-    Top-ntile minus bottom-ntile return per feature per date, equal-weight.
+    Monthly L/S return per factor plus the equal-weight universe, from a
+    stock x date panel with features and fwd_1m. Indexed by the month the
+    return covers (panel date + 1, since fwd_1m at date t is the month after t).
 
-    A date needs at least n_q*5 names with both the feature and the return
-    present (the same floor the Concierge's ntile cutter uses); otherwise that
-    factor is NaN on that date rather than cut from too few names.
+    Each leg is the Concierge's top-minus-bottom ntile series for a
+    single-feature rank spec — the same portfolio it would test if that
+    feature were the whole edge — so a loading of w on factor f means exactly
+    what weight w on rank(f) means in its edge table.
     """
-    out = {}
-    g = df.groupby(date_col)
-    for f in features:
-        vals = {}
-        for d, sub in g:
-            s = sub[[f, ret_col]].dropna()
-            if len(s) < n_q * 5:
-                vals[d] = np.nan
-                continue
-            q = pd.qcut(s[f].rank(method="first"), n_q, labels=False)
-            vals[d] = float(s.loc[q == n_q - 1, ret_col].mean()
-                            - s.loc[q == 0, ret_col].mean())
-        out[f] = pd.Series(vals)
-    return pd.DataFrame(out).sort_index()
+    from engine import EdgeSpec, FeatureSpec, build_composite, quantile_analysis
+    legs = {}
+    for i, f in enumerate(features):
+        if progress:
+            progress(i / max(len(features) + 1, 1), f"leg: {f}")
+        comp = build_composite(panel, EdgeSpec([FeatureSpec(f, "rank", 1.0)],
+                                               sector_neutral=sector_neutral))
+        legs[f] = quantile_analysis(panel, comp, "fwd_1m", n_q)["ls_series"]
+    legs[MARKET_LEG] = panel.groupby("date")["fwd_1m"].mean()
+    X = pd.DataFrame(legs)
+    X.index = pd.DatetimeIndex(X.index).to_period("M") + 1
+    return X.sort_index()
 
 
-def manager_returns(df: pd.DataFrame, target: str, ret_col: str,
-                    date_col: str = "date", weight_col=None) -> pd.Series:
-    """Return of the held names each date — weighted if a weight column is given."""
-    held = df[df[target] == 1].dropna(subset=[ret_col])
-    if weight_col:
-        held = held.dropna(subset=[weight_col])
-        w = held[weight_col].astype(float).clip(lower=0)
-        num = (held[ret_col] * w).groupby(held[date_col]).sum()
-        den = w.groupby(held[date_col]).sum()
-        return (num / den.replace(0, np.nan)).sort_index()
-    return held.groupby(date_col)[ret_col].mean().sort_index()
+def monthly_series(dates: pd.Series, rets: pd.Series,
+                   month_end: bool = True) -> pd.Series:
+    """
+    A return column as a monthly Period series.
+
+    month_end=True: each date is the end of the period the return covers (the
+    usual convention for a return series). False: the date is the start.
+    Rows inside the same month are compounded, so a daily series works too.
+    """
+    d = pd.to_datetime(dates, errors="coerce")
+    r = pd.to_numeric(rets, errors="coerce")
+    ok = d.notna() & r.notna()
+    per = d[ok].dt.to_period("M") + (0 if month_end else 1)
+    return ((1.0 + r[ok]).groupby(per.values).prod() - 1.0).sort_index()
 
 
 @dataclass
 class StyleFold:
-    train_end: pd.Timestamp
-    test_end: pd.Timestamp
+    train_end: pd.Period
+    test_end: pd.Period
     n_train: int          # months
     n_test: int
     oos_corr: float
     oos_r2: float
-    alpha_ann: float      # intercept, annualized — return the factors don't explain
+    alpha_ann: float      # intercept, annualized — return the legs don't explain
 
 
 @dataclass
 class StyleResult:
     manager: pd.Series                # actual manager return per month
     replicated: pd.Series             # OOS replicated return, NaN before coverage
-    factor_returns: pd.DataFrame      # the L/S legs, months × features
+    legs: pd.DataFrame                # months x factor legs
     folds: pd.DataFrame
-    loadings_by_fold: pd.DataFrame    # folds × features (raw-unit betas)
+    loadings_by_fold: pd.DataFrame    # folds x legs (raw-unit betas)
     loadings: pd.Series               # time-averaged across folds
     pooled_corr: float
     pooled_r2: float
-    features: list = field(default_factory=list)
     skipped: list = field(default_factory=list)
 
 
 def _ridge_fit(X: pd.DataFrame, y: pd.Series):
     """Ridge on standardized regressors; returns raw-unit betas + intercept."""
     scaler = StandardScaler().fit(X)
-    Xs = scaler.transform(X)
-    m = RidgeCV(alphas=RIDGE_ALPHAS).fit(Xs, y)
+    m = RidgeCV(alphas=RIDGE_ALPHAS).fit(scaler.transform(X), y)
     beta = pd.Series(m.coef_ / scaler.scale_, index=X.columns)
     intercept = float(m.intercept_ - (beta * scaler.mean_).sum())
     return beta, intercept
 
 
-def _design(df, features, target, ret_col, date_col, weight_col, n_q):
-    fr = factor_ls_returns(df, features, ret_col, date_col, n_q)
-    mr = manager_returns(df, target, ret_col, date_col, weight_col)
+def align(X: pd.DataFrame, y: pd.Series):
+    """Months both sides have, with legs missing on >25% of them dropped."""
     skipped = []
-    # a factor missing on many dates would drag every other factor's months
-    # down with it in a listwise drop — cut it instead, and say so
-    sparse = fr.columns[fr.isna().mean() > 0.25].tolist()
+    sparse = X.columns[X.isna().mean() > 0.25].tolist()
     for f in sparse:
-        skipped.append(f"{f}: L/S leg missing on "
-                       f"{fr[f].isna().mean():.0%} of months, dropped")
-    fr = fr.drop(columns=sparse)
-    X = fr.dropna()
-    y = mr.reindex(X.index).dropna()
-    X = X.loc[y.index]
-    return X, y, fr, mr, skipped
+        skipped.append(f"{f}: leg missing on {X[f].isna().mean():.0%} of "
+                       f"months, dropped")
+    X = X.drop(columns=sparse).dropna()
+    idx = X.index.intersection(y.dropna().index)
+    return X.loc[idx], y.loc[idx], skipped
 
 
-def walk_forward_style(df: pd.DataFrame, features: list, target: str,
-                       ret_col: str, date_col: str = "date", weight_col=None,
-                       n_q: int = 5, init_train_years: int = INIT_TRAIN_YEARS,
-                       step_years: int = STEP_YEARS, progress=None) -> StyleResult:
+def _month_windows(periods: pd.PeriodIndex, init_train_years: int, step_years: int):
+    start, end = periods.min(), periods.max()
+    train_end = start + 12 * init_train_years
+    while train_end <= end:
+        yield train_end, train_end + 12 * step_years
+        train_end = train_end + 12 * step_years
+
+
+def walk_forward_style(X: pd.DataFrame, y: pd.Series,
+                       init_train_years: int = INIT_TRAIN_YEARS,
+                       step_years: int = STEP_YEARS, window_months: int | None = None,
+                       progress=None) -> StyleResult:
     """
-    Expanding-window, out-of-sample style regression.
+    Walk-forward, out-of-sample style regression.
 
-    Each fold: fit loadings on all months strictly before train_end, then
-    replicate the following step_years window with those loadings. Every
-    replicated month comes from a fit that never saw it.
+    Each fold: fit loadings on the months strictly before train_end — all of
+    them (expanding, window_months=None) or only the last window_months
+    (rolling) — then replicate the following step_years window with those
+    loadings. Every replicated month comes from a fit that never saw it.
+    Rolling trades a noisier fit for the ability to follow a style that moves.
     """
-    X, y, fr, mr, skipped = _design(df, features, target, ret_col, date_col,
-                                    weight_col, n_q)
+    X, y, skipped = align(X, y)
     replicated = pd.Series(np.nan, index=y.index, dtype=float)
     rows, betas = [], []
-    windows = list(_fold_windows(pd.Series(y.index), init_train_years, step_years))
+    windows = list(_month_windows(y.index, init_train_years, step_years))
     for i, (train_end, test_end) in enumerate(windows):
         if progress:
-            progress(i / max(len(windows), 1), f"fold to {train_end:%Y}")
+            progress(i / max(len(windows), 1), f"fold to {train_end}")
         tr = y.index < train_end
+        if window_months:
+            tr &= y.index >= train_end - window_months
         te = (y.index >= train_end) & (y.index < test_end)
         if tr.sum() < MIN_TRAIN_MONTHS:
-            skipped.append(f"{train_end:%Y}: only {int(tr.sum())} training months")
+            skipped.append(f"{train_end}: only {int(tr.sum())} training months")
             continue
         if not te.any():
-            skipped.append(f"{train_end:%Y}: no months in the test window")
+            skipped.append(f"{train_end}: no months in the test window")
             continue
         beta, b0 = _ridge_fit(X[tr], y[tr])
         yhat = X[te] @ beta + b0
@@ -364,21 +375,99 @@ def walk_forward_style(df: pd.DataFrame, features: list, target: str,
         pooled_corr = pooled_r2 = np.nan
     lb = pd.DataFrame(betas) if betas else pd.DataFrame(columns=X.columns)
     return StyleResult(
-        manager=y, replicated=replicated, factor_returns=fr,
+        manager=y, replicated=replicated, legs=X,
         folds=pd.DataFrame([f.__dict__ for f in rows]),
         loadings_by_fold=lb,
         loadings=(lb.mean().sort_values(key=abs, ascending=False)
                   if len(lb) else pd.Series(dtype=float)),
-        pooled_corr=pooled_corr, pooled_r2=pooled_r2,
-        features=list(X.columns), skipped=skipped)
+        pooled_corr=pooled_corr, pooled_r2=pooled_r2, skipped=skipped)
 
 
-def full_history_style(df: pd.DataFrame, features: list, target: str,
-                       ret_col: str, date_col: str = "date", weight_col=None,
-                       n_q: int = 5) -> dict:
+KALMAN_DRIFT = {"slow": 1e-5, "medium": 1e-4, "fast": 1e-3}   # beta variance / month
+
+
+def kalman_style(X: pd.DataFrame, y: pd.Series,
+                 init_train_years: int = INIT_TRAIN_YEARS,
+                 drift: float = 1e-4, progress=None) -> StyleResult:
+    """
+    Time-varying loadings: a multivariate dynamic hedge ratio.
+
+    State beta_t (one per leg, plus an intercept) follows a random walk,
+    beta_t = beta_{t-1} + eta_t with eta ~ N(0, drift * I); the observation is
+    y_t = x_t' beta_t + eps_t. Each month is replicated with the *predicted*
+    state beta_{t|t-1} — before that month's return is seen — so the
+    replication is out of sample in the same sense as the walk-forward, just
+    one month at a time instead of one fold at a time. The filter is warm-
+    started from a ridge fit on the initial training block, whose residual
+    variance sets the observation noise.
+
+    `drift` is the one knob: how far the loadings may move per month. Small
+    and this is a slow expanding regression; large and it chases noise.
+    """
+    X, y, skipped = align(X, y)
+    n_init = 12 * init_train_years
+    if len(y) < max(n_init, MIN_TRAIN_MONTHS) + 3:
+        skipped.append(f"only {len(y)} months — not enough to warm-start and filter")
+        return StyleResult(manager=y, replicated=pd.Series(np.nan, index=y.index),
+                           legs=X, folds=pd.DataFrame(), loadings_by_fold=pd.DataFrame(),
+                           loadings=pd.Series(dtype=float), pooled_corr=np.nan,
+                           pooled_r2=np.nan, skipped=skipped)
+    beta0, b0 = _ridge_fit(X.iloc[:n_init], y.iloc[:n_init])
+    resid = y.iloc[:n_init] - (X.iloc[:n_init] @ beta0 + b0)
+    R = float(resid.var()) or 1e-6
+
+    cols = list(X.columns) + ["_alpha"]
+    Z = np.column_stack([X.to_numpy(float), np.ones(len(X))])
+    k = Z.shape[1]
+    beta = np.append(beta0.to_numpy(float), b0)
+    P = np.eye(k) * 0.1                      # warm start: moderately sure
+    Q = np.eye(k) * drift
+    yv = y.to_numpy(float)
+
+    replicated = pd.Series(np.nan, index=y.index, dtype=float)
+    path = np.full((len(y), k), np.nan)
+    for t in range(len(y)):
+        if progress and t % 24 == 0:
+            progress(t / len(y), f"filtering {y.index[t]}")
+        z = Z[t]
+        P = P + Q                            # predict
+        if t >= n_init:
+            replicated.iloc[t] = float(z @ beta)   # beta_{t|t-1}: not yet seen y_t
+        S = float(z @ P @ z) + R             # update
+        K = P @ z / S
+        beta = beta + K * (yv[t] - z @ beta)
+        P = (np.eye(k) - np.outer(K, z)) @ P
+        path[t] = beta
+
+    lb = pd.DataFrame(path, index=y.index, columns=cols)
+    scored = replicated.notna()
+    rows = []
+    for yr, g in replicated[scored].groupby(replicated[scored].index.year):
+        yt = y.loc[g.index]
+        sst = float(((yt - yt.mean()) ** 2).sum())
+        rows.append(StyleFold(
+            g.index.min(), g.index.max() + 1, int((y.index < g.index.min()).sum()),
+            len(g), float(np.corrcoef(yt, g)[0, 1]) if len(g) > 2 else np.nan,
+            float(1 - ((yt - g) ** 2).sum() / sst) if sst > 0 else np.nan,
+            float(lb.loc[g.index, "_alpha"].mean() * 12)))
+    if scored.sum() > 2:
+        ys, yh = y[scored], replicated[scored]
+        pooled_corr = float(np.corrcoef(ys, yh)[0, 1])
+        pooled_r2 = float(1 - ((ys - yh) ** 2).sum() / ((ys - ys.mean()) ** 2).sum())
+    else:
+        pooled_corr = pooled_r2 = np.nan
+    latest = lb.iloc[-1].drop("_alpha")
+    return StyleResult(
+        manager=y, replicated=replicated, legs=X,
+        folds=pd.DataFrame([f.__dict__ for f in rows]),
+        loadings_by_fold=lb.drop(columns="_alpha"),
+        loadings=latest.sort_values(key=abs, ascending=False),
+        pooled_corr=pooled_corr, pooled_r2=pooled_r2, skipped=skipped)
+
+
+def full_history_style(X: pd.DataFrame, y: pd.Series) -> dict:
     """Fit once on every month, to describe the style. In-sample; never scored from."""
-    X, y, _, _, skipped = _design(df, features, target, ret_col, date_col,
-                                  weight_col, n_q)
+    X, y, skipped = align(X, y)
     if len(y) < MIN_TRAIN_MONTHS:
         return {"loadings": pd.Series(dtype=float), "r2": np.nan,
                 "alpha_ann": np.nan, "n_months": int(len(y)), "skipped": skipped}
