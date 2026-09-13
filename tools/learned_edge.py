@@ -5,9 +5,11 @@ Holdings: upload a panel of (date, secid, features..., held_flag), fit what
 separates held names from the rest under a walk-forward protocol, and emit a
 per-name style tilt the Edge Concierge can use as a layer.
 
-Returns: upload the manager's return series, build one long-short leg per
-factor from a stock x date panel (the shipped ones, or an upload), regress the
-manager on the legs — expanding, rolling, or a Kalman filter — and send the
+Returns, two flows: upload the manager's return series, then either build one
+long-short leg per factor from a stock x date panel (the shipped ones, or an
+upload) or bring a wide file of factor returns (Chen-Zimmermann's predictor
+zoo, or your own) and fit active return against a benchmark. Regress the
+target on the legs — expanding, rolling, or a Kalman filter — and send the
 loadings to the Concierge as edge-table weights.
 
 Both are out-of-sample by construction: each fold trains only on prior history
@@ -34,14 +36,21 @@ SHORT_PANEL_LABEL = "Top 1500 · 1998–2025 · short-risk factors"
 
 st.title("Learned Edge")
 
-MODE_HOLD, MODE_RET = "Holdings — what it holds", "Returns — what explains its returns"
+MODE_HOLD = "Holdings — what it holds"
+MODE_RET = "Returns — legs built from a stock × date panel"
+MODE_LEGS = "Returns — legs you bring (Chen–Zimmermann style)"
 mode = st.radio(
-    "Learn the style from", [MODE_HOLD, MODE_RET], horizontal=True, key="lmode",
+    "Learn the style from", [MODE_HOLD, MODE_RET, MODE_LEGS], horizontal=True,
+    key="lmode",
     help="**Holdings**: a classifier on characteristics — what separates held "
-         "names from the rest; the output is a per-name tilt. **Returns**: a "
-         "Sharpe-style regression of the manager's return on factor return "
-         "legs; the output is loadings that become edge-table weights. Same "
-         "question, two kinds of evidence, two panel shapes.")
+         "names from the rest; the output is a per-name tilt. **Returns, legs "
+         "built**: a Sharpe-style regression of the manager's return on "
+         "long–short legs cut from a stock × date panel by the Concierge's own "
+         "engine, plus a market leg. **Returns, legs you bring**: the same "
+         "regression on a wide file of factor returns — Chen–Zimmermann's "
+         "open-source predictor zoo, or your own — fitted on active return so "
+         "no market leg is needed. Both return flows emit loadings that become "
+         "edge-table weights.")
 
 
 def _guess_in(cols, names, fallback=0):
@@ -58,52 +67,321 @@ def _read(data: bytes) -> pd.DataFrame:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Returns-based
+# Returns-based — shared pieces
 # ═════════════════════════════════════════════════════════════════════════════
-if mode == MODE_RET:
-    # ── 1 · Manager returns ──────────────────────────────────────────────────
-    with st.container(border=True, key="rstep1"):
+
+# OSAP predictor -> (shipped feature, sign). Chen–Zimmermann sign every
+# long–short leg so its in-sample mean is positive, so a leg on a "bad"
+# characteristic is long the LOW end: AssetGrowth is long low growth, Size is
+# long small. The sign flips such a loading into the Concierge's convention,
+# where weight w on rank(f) is long HIGH f. Only names whose construction
+# matches a shipped feature closely enough to hand a weight across; anything
+# else stays a diagnostic. Signs follow OSAP's SignalDoc.
+OSAP_CROSSWALK = {
+    "BM": ("btm", 1), "EP": ("earn_yield", 1), "CF": ("fcf_yield", 1),
+    "SP": ("sales_yield", 1), "GP": ("gpa", 1), "roaq": ("roa", 1),
+    "RoE": ("roe", 1), "Leverage": ("leverage", 1), "High52": ("high_52w", 1),
+    "Mom12m": ("mom_12_1", 1), "Mom6m": ("mom_6_1", 1),
+    "STreversal": ("ret_1m", -1), "Accruals": ("accruals", -1),
+    "AssetGrowth": ("asset_gr", -1), "Size": ("log_mcap", -1),
+    "ShareIss1Y": ("dilution_1y", -1),
+}
+
+EST_EXP, EST_ROLL, EST_KAL = "Expanding window", "Rolling window", "Kalman filter"
+
+
+def _parse_dates(s: pd.Series) -> pd.Series:
+    """Dates as written, or yyyymm integers (OSAP's convention) — never epochs."""
+    v = pd.to_numeric(s, errors="coerce")
+    if v.notna().all() and v.between(190001, 210012).all():
+        return pd.to_datetime(v.astype(int).astype(str), format="%Y%m", errors="coerce")
+    return pd.to_datetime(s, errors="coerce")
+
+
+def _manager_intake(prefix: str, with_benchmark: bool):
+    """
+    Step 1 of both returns flows. Returns the monthly target series (the
+    manager's return, or active return against a benchmark column) or stops
+    the script with guidance if nothing is uploaded yet.
+    """
+    with st.container(border=True, key=f"{prefix}step1"):
         st.subheader(
             "1 · Manager returns",
-            help="One row per period: a date and the manager's return. Monthly is "
-                 "the natural grain; daily rows are compounded into months. "
-                 "Values above 1 in magnitude are read as percent.")
-        up = st.file_uploader("Manager returns CSV", type="csv", key="lreturns")
+            help="One row per period: a date and the manager's return"
+                 + (", with the benchmark's return alongside if you want to fit "
+                    "active return" if with_benchmark else "")
+                 + ". Monthly is the natural grain; daily rows are compounded "
+                   "into months. Values above 1 in magnitude are read as percent.")
+        up = st.file_uploader("Manager returns CSV", type="csv", key=f"{prefix}up")
         st.caption("Held in memory for this session only — never written to disk, "
                    "never shared between users, and dropped when you close the tab.")
-        if up is not None:
-            raw_m = _read(up.getvalue())
-            mcols = list(raw_m.columns)
-            c1, c2, c3 = st.columns(3)
-            mdate_col = c1.selectbox("Date", mcols, key="rdate",
-                                     index=_guess_in(mcols, ("date", "month", "period")))
-            mgr_col = c2.selectbox(
-                "Return", mcols, key="rmgr",
-                index=_guess_in(mcols, ("return", "ret", "manager", "portfolio",
-                                        "fund", "strategy", "pnl"), min(1, len(mcols) - 1)))
-            month_end = c3.selectbox(
-                "Each date is the…", ["end of the period it covers", "start"],
-                key="rconv",
-                help="The usual convention for a return series is a month-end date "
-                     "labelling the month just finished.") == "end of the period it covers"
-            _mv = pd.to_numeric(raw_m[mgr_col], errors="coerce").abs()
-            _mscale = 100.0 if _mv.median() > 1.0 else 1.0
-            y = monthly_series(raw_m[mdate_col], raw_m[mgr_col] / _mscale, month_end)
-            if len(y) < 12:
-                st.error(f"Only {len(y)} months of manager returns — need a few years.")
+        if up is None:
+            st.info("Upload the manager's return series to begin — `date` and a "
+                    "return column" + (", plus the benchmark's return for an "
+                                       "active-return fit." if with_benchmark
+                                       else ". The factor legs come from step 2."))
+            st.stop()
+        raw = _read(up.getvalue())
+        cols = list(raw.columns)
+        c1, c2, c3, c4 = st.columns(4)
+        date_col = c1.selectbox("Date", cols, key=f"{prefix}date",
+                                index=_guess_in(cols, ("date", "month", "period")))
+        ret_col = c2.selectbox(
+            "Return", cols, key=f"{prefix}ret",
+            index=_guess_in(cols, ("return", "ret", "manager", "portfolio",
+                                   "fund", "strategy", "pnl"), min(1, len(cols) - 1)))
+        bmk_col = "(none)"
+        if with_benchmark:
+            bmk_col = c3.selectbox(
+                "Benchmark (optional)", ["(none)"] + cols, key=f"{prefix}bmk",
+                index=_guess_in(cols, ("bench", "bmk", "index"), -1) + 1,
+                help="If set, the target is **active return** — fund minus "
+                     "benchmark — so the market exposure cancels and the legs "
+                     "need no market column. Assumes beta ≈ 1 to the benchmark; "
+                     "the caption shows the realized beta so you can check.")
+        month_end = c4.selectbox(
+            "Each date is the…", ["end of the period it covers", "start"],
+            key=f"{prefix}conv",
+            help="The usual convention for a return series is a month-end date "
+                 "labelling the month just finished.") == "end of the period it covers"
+        dates = _parse_dates(raw[date_col])
+        _mv = pd.to_numeric(raw[ret_col], errors="coerce").abs()
+        scale = 100.0 if _mv.median() > 1.0 else 1.0
+        fund = monthly_series(dates, raw[ret_col] / scale, month_end)
+        y, note = fund, ""
+        if bmk_col != "(none)":
+            bmk = monthly_series(dates, raw[bmk_col] / scale, month_end)
+            both = pd.DataFrame({"f": fund, "b": bmk}).dropna()
+            if len(both) < 12:
+                st.error("Fund and benchmark overlap on fewer than 12 months.")
                 st.stop()
-            _ann = (1 + y).prod() ** (12 / len(y)) - 1
-            st.caption(
-                f"{len(y):,} months · {y.index.min()} – {y.index.max()} · "
-                f"{_ann:+.1%}/yr, vol {y.std() * 12 ** 0.5:.1%}"
-                + (" · values read as **percent** and divided by 100" if _mscale > 1 else "")
-                + (f" · {len(raw_m):,} rows compounded into months" if len(raw_m) > len(y) else ""))
-    if up is None:
-        st.info("Upload the manager's return series to begin — `date` and a "
-                "return column. The factor legs come from the panel in step 2.")
-        st.stop()
+            beta = float(both.cov().iloc[0, 1] / both["b"].var()) if both["b"].var() else float("nan")
+            y = (both["f"] - both["b"]).rename("active")
+            note = (f" · **active return** vs `{bmk_col}` · realized beta "
+                    f"**{beta:.2f}** · tracking error {y.std() * 12 ** 0.5:.1%}")
+        if len(y) < 12:
+            st.error(f"Only {len(y)} months — need a few years.")
+            st.stop()
+        _ann = (1 + y).prod() ** (12 / len(y)) - 1
+        st.caption(
+            f"{len(y):,} months · {y.index.min()} – {y.index.max()} · "
+            f"{_ann:+.1%}/yr, vol {y.std() * 12 ** 0.5:.1%}" + note
+            + (" · values read as **percent** and divided by 100" if scale > 1 else "")
+            + (f" · {len(raw):,} rows compounded into months" if len(raw) > len(y) else ""))
+    return y, bmk_col != "(none)"
 
-    # ── 2 · Factor panel ─────────────────────────────────────────────────────
+
+def _estimator_controls(prefix: str):
+    """Step 'Fit' controls shared by both returns flows."""
+    est = st.radio("Estimator", [EST_EXP, EST_ROLL, EST_KAL], horizontal=True,
+                   key=f"{prefix}est",
+                   help="**Expanding**: each fold fits on all prior months and "
+                        "replicates the next window. **Rolling**: the same, on "
+                        "only the last N months — follows a style that moves, "
+                        "at the cost of a noisier fit. **Kalman**: loadings "
+                        "that drift month by month, each month replicated with "
+                        "the loadings predicted before it was seen — a "
+                        "multivariate dynamic hedge ratio.")
+    f1, f2, f3 = st.columns(3)
+    init_years = f1.number_input("Initial train (years)", 1, 20,
+                                 min(INIT_TRAIN_YEARS, 3), 1, key=f"{prefix}init")
+    window_m = step_years = None
+    drift_name = "medium"
+    if est == EST_ROLL:
+        window_m = f2.slider("Window (months)", 24, 120, 60, 12, key=f"{prefix}win")
+        step_years = f3.number_input("Step (years)", 1, 5, STEP_YEARS, 1, key=f"{prefix}stepy")
+    elif est == EST_EXP:
+        step_years = f2.number_input("Step (years)", 1, 5, STEP_YEARS, 1, key=f"{prefix}stepy")
+    else:
+        drift_name = f2.select_slider(
+            "Loading drift", list(KALMAN_DRIFT), value="medium", key=f"{prefix}drift",
+            help="How far the loadings may move per month. Slow ≈ a lazy "
+                 "expanding regression; fast chases noise.")
+    return est, int(init_years), step_years, window_m, drift_name
+
+
+def _fit(X, y, est, init_years, step_years, window_m, drift_name, prog):
+    if est == EST_KAL:
+        return kalman_style(X, y, init_years, KALMAN_DRIFT[drift_name], prog)
+    return walk_forward_style(X, y, init_years, int(step_years), window_m, prog)
+
+
+def _render_style_results(res, prefix: str, active: bool, market_leg=None,
+                          crosswalk=None):
+    """Metrics, the four tabs, and the Concierge handoff, for either flow."""
+    is_kalman = len(res.loadings_by_fold) == len(res.manager) and len(res.manager) > 0
+    folds = res.folds
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Pooled OOS correlation", f"{res.pooled_corr:.3f}",
+              help="Replicated vs actual over every out-of-sample month at once. "
+                   "0 is no relationship.")
+    m2.metric("Pooled OOS R²", f"{res.pooled_r2:.3f}",
+              help="Share of the month-to-month variance the legs explain out of "
+                   "sample. Negative means the replication did worse than a "
+                   "flat line.")
+    m3.metric("Months replicated",
+              f"{int(res.replicated.notna().sum()):,} / {len(res.manager):,}",
+              help="The initial training block is never replicated — no fit "
+                   "existed yet that had not seen it.")
+    if market_leg and market_leg in res.loadings.index:
+        _b = res.loadings[market_leg]
+        m4.metric("Beta to universe" + (" (−1)" if active else ""), f"{_b:.2f}",
+                  help=("Loading on the equal-weight universe leg. With an active-"
+                        "return target this reads as beta − 1, i.e. how far the "
+                        "beta-≈-1 assumption is off." if active else
+                        "Loading on the equal-weight universe leg. Kept separate "
+                        "so beta does not get smeared into the factor loadings; "
+                        "not sent to the Concierge."))
+    else:
+        _alpha = folds["alpha_ann"].mean() if len(folds) else float("nan")
+        m4.metric("Alpha (ann.)", f"{_alpha:+.1%}",
+                  help="The intercept: return the legs don't account for. Gross; "
+                       "read the sign more than the size.")
+
+    if res.skipped:
+        with st.expander(f"{len(res.skipped)} note(s) from the fit"):
+            for s in res.skipped:
+                st.caption(f"· {s}")
+
+    s_fold, s_load, s_rep, s_send = st.tabs(
+        ["Fit over time", "Loadings", "Replication", "Send to Concierge"])
+    target = "active return" if active else "manager"
+
+    with s_fold:
+        if len(folds):
+            _x = folds["train_end"].dt.to_timestamp()
+            fig = go.Figure(go.Scatter(
+                x=_x, y=folds["oos_corr"], mode="lines+markers",
+                line=dict(color=BLUE, width=2), marker=dict(size=7),
+                name="OOS correlation"))
+            fig.add_hline(y=0, line_dash="dash", line_color=INK_2, line_width=2,
+                          annotation_text="no relationship",
+                          annotation_position="bottom left")
+            fig.update_yaxes(title="Out-of-sample correlation", range=[-0.5, 1.0])
+            st.plotly_chart(style(fig, 340), width="stretch")
+            st.caption(("One point per calendar year of filtered months. "
+                        if is_kalman else
+                        "One point per fold, at the month the training set ended. ")
+                       + f"A line that decays means the legs stopped explaining "
+                         f"the {target} — a drift a pooled number hides.")
+            st.dataframe(
+                folds.assign(train_end=folds["train_end"].dt.strftime("%Y-%m"),
+                             test_end=folds["test_end"].dt.strftime("%Y-%m"))
+                     .rename(columns={"train_end": "from", "test_end": "to",
+                                      "n_train": "months before",
+                                      "n_test": "months", "oos_corr": "OOS corr",
+                                      "oos_r2": "OOS R²", "alpha_ann": "alpha (ann.)"})
+                     .style.format({"OOS corr": "{:.3f}", "OOS R²": "{:.3f}",
+                                    "alpha (ann.)": "{:+.1%}"}),
+                width="stretch", hide_index=True)
+        else:
+            st.info("Nothing replicated — the series may be shorter than the "
+                    "initial training window.")
+
+    with s_load:
+        if len(res.loadings):
+            _lab = "latest filtered" if is_kalman else "time-averaged across folds"
+            ld = res.loadings.head(20).iloc[::-1]
+            fig = go.Figure(go.Bar(
+                x=ld.values, y=ld.index, orientation="h",
+                marker_color=[BLUE if v >= 0 else INK_2 for v in ld.values],
+                marker_line_width=0))
+            fig.update_xaxes(title=f"Loading ({_lab})")
+            st.plotly_chart(style(fig, max(280, 22 * len(ld))), width="stretch")
+            st.caption(f"A loading of 0.5 on a leg means the {target} moved half "
+                       f"as much as that long–short portfolio did, holding the "
+                       f"others fixed. Negative = tilted against it.")
+            if len(res.loadings_by_fold) > 1:
+                lbf = res.loadings_by_fold[res.loadings.head(6).index]
+                _x = lbf.index.to_timestamp()
+                fig2 = go.Figure()
+                for i, c in enumerate(lbf.columns):
+                    fig2.add_trace(go.Scatter(
+                        x=_x, y=lbf[c], name=c, mode="lines",
+                        line=dict(color=ramp(len(lbf.columns))[i], width=2)))
+                fig2.add_hline(y=0, line_color=INK_2, line_width=1)
+                fig2.update_yaxes(title="Loading over time")
+                st.plotly_chart(style(fig2, 300), width="stretch")
+                st.caption("The six largest loadings, "
+                           + ("month by month as the filter updates them. "
+                              if is_kalman else "fold by fold. ")
+                           + "Lines that hold their level are the durable part "
+                             "of the style; one that wanders is drift, or a leg "
+                             "the sample can't pin down.")
+
+    with s_rep:
+        both = pd.DataFrame({"actual": res.manager,
+                             "replicated": res.replicated}).dropna()
+        if len(both) > 2:
+            cum = (1 + both).cumprod()
+            _x = cum.index.to_timestamp()
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=_x, y=cum["actual"], name=target.capitalize(),
+                                     mode="lines", line=dict(color=BLUE, width=2)))
+            fig.add_trace(go.Scatter(x=_x, y=cum["replicated"],
+                                     name="Factor replication (OOS)", mode="lines",
+                                     line=dict(color=INK_2, width=2, dash="dash")))
+            fig.update_yaxes(title="Growth of $1, replicated months only")
+            st.plotly_chart(style(fig, 340), width="stretch")
+            te = (both["actual"] - both["replicated"]).std() * (12 ** 0.5)
+            st.caption(f"{target.capitalize()} vs what the legs alone would have "
+                       f"returned, using only out-of-sample loadings. Tracking "
+                       f"error **{te:.1%}** annualized. The gap is what the legs "
+                       f"don't explain: selection, timing, or a factor not in "
+                       f"the set.")
+        else:
+            st.info("Nothing replicated yet.")
+
+    with s_send:
+        fac = res.loadings.drop(market_leg, errors="ignore") if market_leg else res.loadings
+        if crosswalk is not None:
+            mapped = {k: (f, s) for k, (f, s) in crosswalk.items() if k in fac.index}
+            unmapped = [k for k in fac.index if k not in mapped]
+            st.caption("Legs whose construction matches a shipped feature are "
+                       "translated — name and sign — into rows for the "
+                       "Concierge's edge table, scaled so the largest is ±1. "
+                       "The rest are diagnostics: real exposures, just to "
+                       "characteristics the Concierge doesn't carry.")
+            if unmapped:
+                with st.expander(f"{len(unmapped)} leg(s) with no shipped feature"):
+                    st.caption(", ".join(f"`{k}` {fac[k]:+.2f}" for k in unmapped))
+            fac = pd.Series({f: fac[k] * s for k, (f, s) in mapped.items()}) \
+                .sort_values(key=abs, ascending=False)
+        else:
+            st.caption("The factor loadings (market leg excluded), scaled so the "
+                       "largest is ±1, become rows in the Concierge's edge table "
+                       "— transform `rank`, joined by `+`. Edit them there before "
+                       "testing. Load the same panel there and the names resolve.")
+        if len(fac):
+            n_send = st.slider("Legs to send", 1, len(fac), min(6, len(fac)),
+                               key=f"{prefix}send_n",
+                               help="Largest loadings first. Fewer is usually "
+                                    "better — the tail is mostly noise.")
+            top = fac.head(n_send)
+            scale = top.abs().max() or 1.0
+            rows_out = pd.DataFrame({
+                "feature": top.index, "transform": "rank",
+                "weight": (top / scale).round(2).values, "op": "+"})
+            st.dataframe(rows_out, width="stretch", hide_index=True)
+            if st.button("Send to Edge Concierge", type="primary", key=f"{prefix}send"):
+                st.session_state["builder"] = rows_out
+                st.session_state.pop("builder_editor", None)
+                st.session_state["nl_note"] = (
+                    f"Loaded from Learned Edge: the returns-based style "
+                    f"regression's top {n_send} loading(s), scaled to ±1.")
+                st.success("Sent. Open the Edge Concierge — step 4 now holds "
+                           "these rows.")
+        else:
+            st.info("No leg maps to a shipped feature, so there is nothing to "
+                    "hand across — the loadings above are the result.")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Returns — legs built from a stock × date panel
+# ═════════════════════════════════════════════════════════════════════════════
+if mode == MODE_RET:
+    y, active = _manager_intake("r", with_benchmark=False)
+
     with st.container(border=True, key="rstep2"):
         st.subheader(
             "2 · Factor panel",
@@ -159,7 +437,6 @@ if mode == MODE_RET:
             st.warning("Pick at least one factor.")
             st.stop()
 
-    # ── 3 · Universe ─────────────────────────────────────────────────────────
     with st.container(border=True, key="rstep3"):
         st.subheader("3 · Universe",
                      help="The names the legs are cut from. Blank by default: the "
@@ -167,34 +444,9 @@ if mode == MODE_RET:
         uni = universe_block(fpanel, "lret", all_feats)
     fit_panel = uni["panel"]
 
-    # ── 4 · Fit ──────────────────────────────────────────────────────────────
     with st.container(border=True, key="rstep4"):
-        st.subheader(
-            "4 · Fit",
-            help="Regress the manager on the legs, out of sample. **Expanding**: "
-                 "each fold fits on all prior months and replicates the next "
-                 "window. **Rolling**: the same, on only the last N months — "
-                 "follows a style that moves, at the cost of a noisier fit. "
-                 "**Kalman**: loadings that drift month by month, each month "
-                 "replicated with the loadings predicted before it was seen — "
-                 "a multivariate dynamic hedge ratio.")
-        EST_EXP, EST_ROLL, EST_KAL = "Expanding window", "Rolling window", "Kalman filter"
-        est = st.radio("Estimator", [EST_EXP, EST_ROLL, EST_KAL], horizontal=True, key="rest")
-        f1, f2, f3 = st.columns(3)
-        init_years = f1.number_input("Initial train (years)", 1, 20,
-                                     min(INIT_TRAIN_YEARS, 3), 1, key="rinit")
-        window_m = step_years = None
-        drift_name = "medium"
-        if est == EST_ROLL:
-            window_m = f2.slider("Window (months)", 24, 120, 60, 12, key="rwin")
-            step_years = f3.number_input("Step (years)", 1, 5, STEP_YEARS, 1, key="rstep")
-        elif est == EST_EXP:
-            step_years = f2.number_input("Step (years)", 1, 5, STEP_YEARS, 1, key="rstep")
-        else:
-            drift_name = f2.select_slider(
-                "Loading drift", list(KALMAN_DRIFT), value="medium", key="rdrift",
-                help="How far the loadings may move per month. Slow ≈ a lazy "
-                     "expanding regression; fast chases noise.")
+        st.subheader("4 · Fit", help="Regress the manager on the legs, out of sample.")
+        est, init_years, step_years, window_m, drift_name = _estimator_controls("r")
         run = st.button("Fit", type="primary", key="rrun")
         st.caption(f"{len(legs_sel)} legs from {fit_panel['ticker'].nunique():,} names · "
                    f"{fit_panel['date'].nunique():,} panel months · "
@@ -204,8 +456,8 @@ if mode == MODE_RET:
     _legs_key = (fpanel_key, tuple(legs_sel), int(n_q), bool(neutral),
                  tuple(uni["constraints"]), tuple(uni["sectors"]),
                  tuple(uni.get("industries", ())), uni["years"], len(fit_panel))
-    _key = (_legs_key, est, int(init_years), step_years, window_m, drift_name,
-            mgr_col, mdate_col, month_end, len(y), float(y.sum()))
+    _key = (_legs_key, est, init_years, step_years, window_m, drift_name,
+            len(y), float(y.sum()))
     if run:
         bar = st.progress(0.0, "Fitting…")
         try:
@@ -215,12 +467,8 @@ if mode == MODE_RET:
                 st.session_state["style_legs"] = X
                 st.session_state["style_legs_key"] = _legs_key
             X = st.session_state["style_legs"]
-            prog = lambda f, m: bar.progress(min(0.8 + f * 0.2, 1.0), m)
-            if est == EST_KAL:
-                res = kalman_style(X, y, int(init_years), KALMAN_DRIFT[drift_name], prog)
-            else:
-                res = walk_forward_style(X, y, int(init_years), int(step_years),
-                                         window_m, prog)
+            res = _fit(X, y, est, init_years, step_years, window_m, drift_name,
+                       lambda f, m: bar.progress(min(0.8 + f * 0.2, 1.0), m))
             bar.progress(1.0, "Done")
             st.session_state["style_res"] = res
             st.session_state["style_key"] = _key
@@ -234,147 +482,92 @@ if mode == MODE_RET:
     if st.session_state.get("style_key") != _key:
         st.info("Settings changed since the last fit — press **Fit** to refresh. "
                 "The results below are from the previous run.")
-    is_kalman = res.folds.shape[0] > 0 and "n_train" in res.folds and \
-        len(res.loadings_by_fold) == len(res.manager)
+    _render_style_results(res, "r", active, market_leg=MARKET_LEG)
+    st.stop()
 
-    # ── Results ──────────────────────────────────────────────────────────────
-    folds = res.folds
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Pooled OOS correlation", f"{res.pooled_corr:.3f}",
-              help="Replicated vs actual manager return over every out-of-sample "
-                   "month at once. 0 is no relationship.")
-    m2.metric("Pooled OOS R²", f"{res.pooled_r2:.3f}",
-              help="Share of the manager's month-to-month variance the legs "
-                   "explain out of sample. Negative means the replication did "
-                   "worse than a flat line.")
-    m3.metric("Months replicated",
-              f"{int(res.replicated.notna().sum()):,} / {len(res.manager):,}",
-              help="The initial training block is never replicated — no fit "
-                   "existed yet that had not seen it.")
-    _beta_mkt = res.loadings.get(MARKET_LEG, float("nan"))
-    m4.metric("Beta to universe", f"{_beta_mkt:.2f}",
-              help="Loading on the equal-weight universe leg. Kept separate so "
-                   "the manager's beta does not get smeared into the factor "
-                   "loadings; it is not sent to the Concierge.")
 
-    if res.skipped:
-        with st.expander(f"{len(res.skipped)} note(s) from the fit"):
-            for s in res.skipped:
-                st.caption(f"· {s}")
+# ═════════════════════════════════════════════════════════════════════════════
+# Factor returns — bring the legs (Chen–Zimmermann style)
+# ═════════════════════════════════════════════════════════════════════════════
+if mode == MODE_LEGS:
+    y, active = _manager_intake("z", with_benchmark=True)
 
-    s_fold, s_load, s_rep, s_send = st.tabs(
-        ["Fit over time", "Loadings", "Replication", "Send to Concierge"])
+    with st.container(border=True, key="zstep2"):
+        st.subheader(
+            "2 · Factor returns",
+            help="A wide file of long–short factor returns: one date column, one "
+                 "column per leg. Chen–Zimmermann's `PredictorLSretWide` is the "
+                 "canonical one — ~200 published predictors, monthly, in percent, "
+                 "`yyyymm` dates, each signed so its mean is positive. Nothing is "
+                 "built here; the columns you bring are the regressors you get. "
+                 "There is no market leg in such a file — fit **active return** "
+                 "(a benchmark column in step 1) so beta cancels.")
+        fup = st.file_uploader("Factor returns CSV", type="csv", key="zlegs_up")
+        if fup is None:
+            st.info("Upload the wide factor-return file. With no benchmark in "
+                    "step 1 the fit is on total return, and the market exposure "
+                    "will land in the intercept and any market-correlated leg.")
+            st.stop()
+        raw_z = _read(fup.getvalue())
+        zcols = list(raw_z.columns)
+        c1, c2 = st.columns([1, 1])
+        zdate = c1.selectbox("Date", zcols, key="zlegs_date",
+                             index=_guess_in(zcols, ("date", "month", "yyyymm", "period")))
+        _zn = [c for c in zcols if c != zdate and pd.api.types.is_numeric_dtype(raw_z[c])
+               and raw_z[c].notna().any()]
+        _zv = pd.to_numeric(raw_z[_zn].stack(), errors="coerce").abs() if _zn else pd.Series(dtype=float)
+        pct = c2.toggle("Values are in percent", value=bool(len(_zv) and _zv.median() > 1.0),
+                        key="zpct", help="OSAP files are. Divides by 100.")
+        legs_sel = st.multiselect(
+            "Legs", _zn, default=_zn, key="zlegs",
+            help="Every numeric column. With 200 legs and ~200 months even ridge "
+                 "is thin — prefer a chosen subset, or lean on the Kalman "
+                 "estimator's shrinkage.")
+        if not legs_sel:
+            st.warning("Pick at least one leg.")
+            st.stop()
+        zdates = _parse_dates(raw_z[zdate])
+        X = pd.DataFrame({c: monthly_series(zdates, raw_z[c] / (100.0 if pct else 1.0), True)
+                          for c in legs_sel})
+        overlap = X.dropna(how="all").index.intersection(y.index)
+        n_map = sum(1 for c in legs_sel if c in OSAP_CROSSWALK)
+        st.caption(f"{len(legs_sel)} legs · {len(X):,} months · overlap with the "
+                   f"manager **{len(overlap):,}** months · {n_map} leg(s) map to "
+                   f"shipped features for the Concierge handoff.")
+        if len(overlap) < 24:
+            st.error("Fewer than 24 overlapping months — check the date "
+                     "conventions on both files.")
+            st.stop()
 
-    with s_fold:
-        if len(folds):
-            _x = folds["train_end"].dt.to_timestamp()
-            fig = go.Figure(go.Scatter(
-                x=_x, y=folds["oos_corr"], mode="lines+markers",
-                line=dict(color=BLUE, width=2), marker=dict(size=7),
-                name="OOS correlation"))
-            fig.add_hline(y=0, line_dash="dash", line_color=INK_2, line_width=2,
-                          annotation_text="no relationship",
-                          annotation_position="bottom left")
-            fig.update_yaxes(title="Out-of-sample correlation", range=[-0.5, 1.0])
-            st.plotly_chart(style(fig, 340), width="stretch")
-            st.caption(("One point per calendar year of filtered months. "
-                        if is_kalman else
-                        "One point per fold, at the month the training set ended. ")
-                       + "A line that decays means the legs stopped explaining "
-                         "the manager — a drift a pooled number hides.")
-            st.dataframe(
-                folds.assign(train_end=folds["train_end"].dt.strftime("%Y-%m"),
-                             test_end=folds["test_end"].dt.strftime("%Y-%m"))
-                     .rename(columns={"train_end": "from", "test_end": "to",
-                                      "n_train": "months before",
-                                      "n_test": "months", "oos_corr": "OOS corr",
-                                      "oos_r2": "OOS R²", "alpha_ann": "alpha (ann.)"})
-                     .style.format({"OOS corr": "{:.3f}", "OOS R²": "{:.3f}",
-                                    "alpha (ann.)": "{:+.1%}"}),
-                width="stretch", hide_index=True)
-        else:
-            st.info("Nothing replicated — the series may be shorter than the "
-                    "initial training window.")
+    with st.container(border=True, key="zstep3"):
+        st.subheader("3 · Fit",
+                     help="Regress the target on the legs, out of sample.")
+        est, init_years, step_years, window_m, drift_name = _estimator_controls("z")
+        run = st.button("Fit", type="primary", key="zrun")
+        st.caption(f"{len(legs_sel)} legs · {len(overlap):,} overlapping months · "
+                   f"target: {'active return' if active else 'total return'}.")
 
-    with s_load:
-        if len(res.loadings):
-            _lab = "latest filtered" if is_kalman else "time-averaged across folds"
-            ld = res.loadings.head(20).iloc[::-1]
-            fig = go.Figure(go.Bar(
-                x=ld.values, y=ld.index, orientation="h",
-                marker_color=[BLUE if v >= 0 else INK_2 for v in ld.values],
-                marker_line_width=0))
-            fig.update_xaxes(title=f"Loading ({_lab})")
-            st.plotly_chart(style(fig, max(280, 22 * len(ld))), width="stretch")
-            st.caption("A loading of 0.5 on a leg means the manager moved half "
-                       "as much as that long–short portfolio did, holding the "
-                       "others fixed. Negative = tilted against it.")
-            if len(res.loadings_by_fold) > 1:
-                lbf = res.loadings_by_fold[res.loadings.head(6).index]
-                _x = lbf.index.to_timestamp()
-                fig2 = go.Figure()
-                for i, c in enumerate(lbf.columns):
-                    fig2.add_trace(go.Scatter(
-                        x=_x, y=lbf[c], name=c, mode="lines",
-                        line=dict(color=ramp(len(lbf.columns))[i], width=2)))
-                fig2.add_hline(y=0, line_color=INK_2, line_width=1)
-                fig2.update_yaxes(title="Loading over time")
-                st.plotly_chart(style(fig2, 300), width="stretch")
-                st.caption("The six largest loadings, "
-                           + ("month by month as the filter updates them. "
-                              if is_kalman else "fold by fold. ")
-                           + "Lines that hold their level are the durable part "
-                             "of the style; one that wanders is drift, or a leg "
-                             "the sample can't pin down.")
+    _key = (fup.name, len(raw_z), tuple(legs_sel), pct, est, init_years,
+            step_years, window_m, drift_name, len(y), float(y.sum()))
+    if run:
+        bar = st.progress(0.0, "Fitting…")
+        try:
+            res = _fit(X, y, est, init_years, step_years, window_m, drift_name,
+                       lambda f, m: bar.progress(min(f, 1.0), m))
+            bar.progress(1.0, "Done")
+            st.session_state["legs_res"] = res
+            st.session_state["legs_key"] = _key
+        except Exception as e:
+            bar.empty()
+            st.error(f"Fit failed: {e}")
 
-    with s_rep:
-        both = pd.DataFrame({"manager": res.manager,
-                             "replicated": res.replicated}).dropna()
-        if len(both) > 2:
-            cum = (1 + both).cumprod()
-            _x = cum.index.to_timestamp()
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=_x, y=cum["manager"], name="Manager",
-                                     mode="lines", line=dict(color=BLUE, width=2)))
-            fig.add_trace(go.Scatter(x=_x, y=cum["replicated"],
-                                     name="Factor replication (OOS)", mode="lines",
-                                     line=dict(color=INK_2, width=2, dash="dash")))
-            fig.update_yaxes(title="Growth of $1, replicated months only")
-            st.plotly_chart(style(fig, 340), width="stretch")
-            te = (both["manager"] - both["replicated"]).std() * (12 ** 0.5)
-            st.caption(f"Manager vs what the legs alone would have returned, "
-                       f"using only out-of-sample loadings. Tracking error "
-                       f"**{te:.1%}** annualized. The gap is what the legs "
-                       f"don't explain: selection, timing, or a factor not in "
-                       f"the panel.")
-        else:
-            st.info("Nothing replicated yet.")
-
-    with s_send:
-        st.caption("The factor loadings (market leg excluded), scaled so the "
-                   "largest is ±1, become rows in the Concierge's edge table — "
-                   "transform `rank`, joined by `+`. Edit them there before "
-                   "testing. Load the same panel there and the names resolve.")
-        fac = res.loadings.drop(MARKET_LEG, errors="ignore")
-        if len(fac):
-            n_send = st.slider("Legs to send", 1, len(fac), min(6, len(fac)),
-                               key="rsend_n",
-                               help="Largest loadings first. Fewer is usually "
-                                    "better — the tail is mostly noise.")
-            top = fac.head(n_send)
-            scale = top.abs().max() or 1.0
-            rows_out = pd.DataFrame({
-                "feature": top.index, "transform": "rank",
-                "weight": (top / scale).round(2).values, "op": "+"})
-            st.dataframe(rows_out, width="stretch", hide_index=True)
-            if st.button("Send to Edge Concierge", type="primary", key="rsend"):
-                st.session_state["builder"] = rows_out
-                st.session_state.pop("builder_editor", None)
-                st.session_state["nl_note"] = (
-                    f"Loaded from Learned Edge: the returns-based style "
-                    f"regression's top {n_send} loading(s), scaled to ±1.")
-                st.success("Sent. Open the Edge Concierge — step 4 now holds "
-                           "these rows.")
+    res = st.session_state.get("legs_res")
+    if res is None:
+        st.stop()
+    if st.session_state.get("legs_key") != _key:
+        st.info("Settings changed since the last fit — press **Fit** to refresh. "
+                "The results below are from the previous run.")
+    _render_style_results(res, "z", active, crosswalk=OSAP_CROSSWALK)
     st.stop()
 
 
