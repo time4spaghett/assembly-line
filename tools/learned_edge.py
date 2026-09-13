@@ -21,7 +21,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from data_io import load_base_panel, load_short_panel, normalize_csv
+from data_io import load_base_panel, load_osap_ls, load_short_panel, normalize_csv
 from engine import feature_columns
 from learned import (INIT_TRAIN_YEARS, KALMAN_DRIFT, MARKET_LEG, PROB_COL,
                      SIZE_GROUPS, STEP_YEARS, build_learned_style_panel,
@@ -502,27 +502,46 @@ if mode == MODE_LEGS:
                  "built here; the columns you bring are the regressors you get. "
                  "There is no market leg in such a file — fit **active return** "
                  "(a benchmark column in step 1) so beta cancels.")
-        fup = st.file_uploader("Factor returns CSV", type="csv", key="zlegs_up")
-        if fup is None:
-            st.info("Upload the wide factor-return file. With no benchmark in "
-                    "step 1 the fit is on total return, and the market exposure "
-                    "will land in the intercept and any market-correlated leg.")
-            st.stop()
-        raw_z = _read(fup.getvalue())
-        zcols = list(raw_z.columns)
-        c1, c2 = st.columns([1, 1])
-        zdate = c1.selectbox("Date", zcols, key="zlegs_date",
-                             index=_guess_in(zcols, ("date", "month", "yyyymm", "period")))
-        _zn = [c for c in zcols if c != zdate and pd.api.types.is_numeric_dtype(raw_z[c])
-               and raw_z[c].notna().any()]
-        _zv = pd.to_numeric(raw_z[_zn].stack(), errors="coerce").abs() if _zn else pd.Series(dtype=float)
-        pct = c2.toggle("Values are in percent", value=bool(len(_zv) and _zv.median() > 1.0),
-                        key="zpct", help="OSAP files are. Divides by 100.")
+        OSAP_LABEL = "Chen–Zimmermann long–short returns · 2015 → latest release"
+        zsrc = st.radio("Source", [OSAP_LABEL, "Upload CSV"], key="zsrc", horizontal=True,
+                        help="The shipped file is OSAP's original-paper long–short "
+                             "portfolios (`PredictorPortsFull`, `LS` rows), monthly, "
+                             "trimmed to 2015 onward, stored as decimals. Cite Chen & "
+                             "Zimmermann (2022), *Critical Finance Review*.")
+        if zsrc == OSAP_LABEL:
+            raw_z = load_osap_ls()
+            zdate, pct, src_label = "date", False, "osap"
+            _zn = [c for c in raw_z.columns if c != "date"]
+            _default = [c for c in _zn if c in OSAP_CROSSWALK]
+            st.caption(f"{len(_zn)} predictors · {raw_z['date'].min():%Y-%m} – "
+                       f"{raw_z['date'].max():%Y-%m} · {len(raw_z)} months. Defaults "
+                       f"to the {len(_default)} legs that map to shipped features — "
+                       f"{len(_zn)} legs on {len(raw_z)} months is far too thin to "
+                       f"fit all at once; add the ones the manager is likely to "
+                       f"carry.")
+        else:
+            fup = st.file_uploader("Factor returns CSV", type="csv", key="zlegs_up")
+            if fup is None:
+                st.info("Upload the wide factor-return file. With no benchmark in "
+                        "step 1 the fit is on total return, and the market exposure "
+                        "will land in the intercept and any market-correlated leg.")
+                st.stop()
+            raw_z = _read(fup.getvalue())
+            src_label = f"csv:{fup.name}:{len(raw_z)}"
+            zcols = list(raw_z.columns)
+            c1, c2 = st.columns([1, 1])
+            zdate = c1.selectbox("Date", zcols, key="zlegs_date",
+                                 index=_guess_in(zcols, ("date", "month", "yyyymm", "period")))
+            _zn = [c for c in zcols if c != zdate and pd.api.types.is_numeric_dtype(raw_z[c])
+                   and raw_z[c].notna().any()]
+            _zv = pd.to_numeric(raw_z[_zn].stack(), errors="coerce").abs() if _zn else pd.Series(dtype=float)
+            pct = c2.toggle("Values are in percent", value=bool(len(_zv) and _zv.median() > 1.0),
+                            key="zpct", help="OSAP files are. Divides by 100.")
+            _default = _zn
         legs_sel = st.multiselect(
-            "Legs", _zn, default=_zn, key="zlegs",
-            help="Every numeric column. With 200 legs and ~200 months even ridge "
-                 "is thin — prefer a chosen subset, or lean on the Kalman "
-                 "estimator's shrinkage.")
+            "Legs", _zn, default=_default, key=f"zlegs_{src_label[:4]}",
+            help="With 200 legs and ~200 months even ridge is thin — prefer a "
+                 "chosen subset, or lean on the Kalman estimator's shrinkage.")
         if not legs_sel:
             st.warning("Pick at least one leg.")
             st.stop()
@@ -547,7 +566,7 @@ if mode == MODE_LEGS:
         st.caption(f"{len(legs_sel)} legs · {len(overlap):,} overlapping months · "
                    f"target: {'active return' if active else 'total return'}.")
 
-    _key = (fup.name, len(raw_z), tuple(legs_sel), pct, est, init_years,
+    _key = (src_label, tuple(legs_sel), pct, est, init_years,
             step_years, window_m, drift_name, len(y), float(y.sum()))
     if run:
         bar = st.progress(0.0, "Fitting…")

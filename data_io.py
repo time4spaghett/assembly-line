@@ -61,6 +61,18 @@ def load_short_panel() -> pd.DataFrame:
     return pd.read_parquet(SHORT_PANEL)
 
 
+def load_osap_ls() -> pd.DataFrame:
+    """
+    Chen–Zimmermann Open Source Asset Pricing long–short predictor returns,
+    2015-01 to the latest release, wide: `date` (month-end) plus one column
+    per predictor, as decimals. Original-paper constructions (`op`), signed by
+    the authors so each leg's in-sample mean is positive. Cite Chen &
+    Zimmermann (2022), Critical Finance Review.
+    """
+    import pathlib
+    return pd.read_parquet(pathlib.Path(__file__).parent / "data" / "osap_ls.parquet")
+
+
 def _fwd_from_prices(df: pd.DataFrame, price_col: str) -> pd.DataFrame:
     """Compute forward simple returns at each horizon from monthly closes."""
     px = df.pivot_table(index="month", columns="ticker", values=price_col,
