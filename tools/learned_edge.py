@@ -5,11 +5,9 @@ Holdings: upload a panel of (date, secid, features..., held_flag), fit what
 separates held names from the rest under a walk-forward protocol, and emit a
 per-name style tilt the Edge Concierge can use as a layer.
 
-Returns, two flows: upload the manager's return series, then either build one
-long-short leg per factor from a stock x date panel (the shipped ones, or an
-upload) or bring a wide file of factor returns (Chen-Zimmermann's predictor
-zoo, or your own) and fit active return against a benchmark. Regress the
-target on the legs — expanding, rolling, or a Kalman filter — and send the
+Returns: upload the manager's return series, build one long-short leg per
+factor from a stock x date panel (the shipped ones, or an upload), regress the
+manager on the legs — expanding, rolling, or a Kalman filter — and send the
 loadings to the Concierge as edge-table weights.
 
 Both are out-of-sample by construction: each fold trains only on prior history
@@ -21,7 +19,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from data_io import load_base_panel, load_osap_ls, load_short_panel, normalize_csv
+from data_io import load_base_panel, load_short_panel, normalize_csv
 from engine import feature_columns
 from learned import (INIT_TRAIN_YEARS, KALMAN_DRIFT, MARKET_LEG, PROB_COL,
                      SIZE_GROUPS, STEP_YEARS, build_learned_style_panel,
@@ -37,20 +35,14 @@ SHORT_PANEL_LABEL = "Top 1500 · 1998–2025 · short-risk factors"
 st.title("Learned Edge")
 
 MODE_HOLD = "Holdings — what it holds"
-MODE_RET = "Returns — legs built from a stock × date panel"
-MODE_LEGS = "Returns — legs you bring (Chen–Zimmermann style)"
+MODE_RET = "Returns — what explains its returns"
 mode = st.radio(
-    "Learn the style from", [MODE_HOLD, MODE_RET, MODE_LEGS], horizontal=True,
-    key="lmode",
+    "Learn the style from", [MODE_HOLD, MODE_RET], horizontal=True, key="lmode",
     help="**Holdings**: a classifier on characteristics — what separates held "
-         "names from the rest; the output is a per-name tilt. **Returns, legs "
-         "built**: a Sharpe-style regression of the manager's return on "
-         "long–short legs cut from a stock × date panel by the Concierge's own "
-         "engine, plus a market leg. **Returns, legs you bring**: the same "
-         "regression on a wide file of factor returns — Chen–Zimmermann's "
-         "open-source predictor zoo, or your own — fitted on active return so "
-         "no market leg is needed. Both return flows emit loadings that become "
-         "edge-table weights.")
+         "names from the rest; the output is a per-name tilt. **Returns**: a "
+         "Sharpe-style regression of the manager's return on long–short legs "
+         "cut from a stock × date panel by the Concierge's own engine, plus a "
+         "market leg; the output is loadings that become edge-table weights.")
 
 
 def _guess_in(cols, names, fallback=0):
@@ -67,31 +59,14 @@ def _read(data: bytes) -> pd.DataFrame:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Returns-based — shared pieces
+# Returns-based
 # ═════════════════════════════════════════════════════════════════════════════
-
-# OSAP predictor -> (shipped feature, sign). Chen–Zimmermann sign every
-# long–short leg so its in-sample mean is positive, so a leg on a "bad"
-# characteristic is long the LOW end: AssetGrowth is long low growth, Size is
-# long small. The sign flips such a loading into the Concierge's convention,
-# where weight w on rank(f) is long HIGH f. Only names whose construction
-# matches a shipped feature closely enough to hand a weight across; anything
-# else stays a diagnostic. Signs follow OSAP's SignalDoc.
-OSAP_CROSSWALK = {
-    "BM": ("btm", 1), "EP": ("earn_yield", 1), "CF": ("fcf_yield", 1),
-    "SP": ("sales_yield", 1), "GP": ("gpa", 1), "roaq": ("roa", 1),
-    "RoE": ("roe", 1), "Leverage": ("leverage", 1), "High52": ("high_52w", 1),
-    "Mom12m": ("mom_12_1", 1), "Mom6m": ("mom_6_1", 1),
-    "STreversal": ("ret_1m", -1), "Accruals": ("accruals", -1),
-    "AssetGrowth": ("asset_gr", -1), "Size": ("log_mcap", -1),
-    "ShareIss1Y": ("dilution_1y", -1),
-}
 
 EST_EXP, EST_ROLL, EST_KAL = "Expanding window", "Rolling window", "Kalman filter"
 
 
 def _parse_dates(s: pd.Series) -> pd.Series:
-    """Dates as written, or yyyymm integers (OSAP's convention) — never epochs."""
+    """Dates as written, or yyyymm integers — never epochs."""
     v = pd.to_numeric(s, errors="coerce")
     if v.notna().all() and v.between(190001, 210012).all():
         return pd.to_datetime(v.astype(int).astype(str), format="%Y%m", errors="coerce")
@@ -206,8 +181,7 @@ def _fit(X, y, est, init_years, step_years, window_m, drift_name, prog):
     return walk_forward_style(X, y, init_years, int(step_years), window_m, prog)
 
 
-def _render_style_results(res, prefix: str, active: bool, market_leg=None,
-                          crosswalk=None):
+def _render_style_results(res, prefix: str, active: bool, market_leg=None):
     """Metrics, the four tabs, and the Concierge handoff, for either flow."""
     is_kalman = len(res.loadings_by_fold) == len(res.manager) and len(res.manager) > 0
     folds = res.folds
@@ -334,21 +308,7 @@ def _render_style_results(res, prefix: str, active: bool, market_leg=None,
 
     with s_send:
         fac = res.loadings.drop(market_leg, errors="ignore") if market_leg else res.loadings
-        if crosswalk is not None:
-            mapped = {k: (f, s) for k, (f, s) in crosswalk.items() if k in fac.index}
-            unmapped = [k for k in fac.index if k not in mapped]
-            st.caption("Legs whose construction matches a shipped feature are "
-                       "translated — name and sign — into rows for the "
-                       "Concierge's edge table, scaled so the largest is ±1. "
-                       "The rest are diagnostics: real exposures, just to "
-                       "characteristics the Concierge doesn't carry.")
-            if unmapped:
-                with st.expander(f"{len(unmapped)} leg(s) with no shipped feature"):
-                    st.caption(", ".join(f"`{k}` {fac[k]:+.2f}" for k in unmapped))
-            fac = pd.Series({f: fac[k] * s for k, (f, s) in mapped.items()}) \
-                .sort_values(key=abs, ascending=False)
-        else:
-            st.caption("The factor loadings (market leg excluded), scaled so the "
+        st.caption("The factor loadings (market leg excluded), scaled so the "
                        "largest is ±1, become rows in the Concierge's edge table "
                        "— transform `rank`, joined by `+`. Edit them there before "
                        "testing. Load the same panel there and the names resolve.")
@@ -372,8 +332,7 @@ def _render_style_results(res, prefix: str, active: bool, market_leg=None,
                 st.success("Sent. Open the Edge Concierge — step 4 now holds "
                            "these rows.")
         else:
-            st.info("No leg maps to a shipped feature, so there is nothing to "
-                    "hand across — the loadings above are the result.")
+            st.info("Nothing to hand across yet.")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -483,110 +442,6 @@ if mode == MODE_RET:
         st.info("Settings changed since the last fit — press **Fit** to refresh. "
                 "The results below are from the previous run.")
     _render_style_results(res, "r", active, market_leg=MARKET_LEG)
-    st.stop()
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Factor returns — bring the legs (Chen–Zimmermann style)
-# ═════════════════════════════════════════════════════════════════════════════
-if mode == MODE_LEGS:
-    y, active = _manager_intake("z", with_benchmark=True)
-
-    with st.container(border=True, key="zstep2"):
-        st.subheader(
-            "2 · Factor returns",
-            help="A wide file of long–short factor returns: one date column, one "
-                 "column per leg. Chen–Zimmermann's `PredictorLSretWide` is the "
-                 "canonical one — ~200 published predictors, monthly, in percent, "
-                 "`yyyymm` dates, each signed so its mean is positive. Nothing is "
-                 "built here; the columns you bring are the regressors you get. "
-                 "There is no market leg in such a file — fit **active return** "
-                 "(a benchmark column in step 1) so beta cancels.")
-        OSAP_LABEL = "Chen–Zimmermann long–short returns · 2015 → latest release"
-        zsrc = st.radio("Source", [OSAP_LABEL, "Upload CSV"], key="zsrc", horizontal=True,
-                        help="The shipped file is OSAP's original-paper long–short "
-                             "portfolios (`PredictorPortsFull`, `LS` rows), monthly, "
-                             "trimmed to 2015 onward, stored as decimals. Cite Chen & "
-                             "Zimmermann (2022), *Critical Finance Review*.")
-        if zsrc == OSAP_LABEL:
-            raw_z = load_osap_ls()
-            zdate, pct, src_label = "date", False, "osap"
-            _zn = [c for c in raw_z.columns if c != "date"]
-            _default = [c for c in _zn if c in OSAP_CROSSWALK]
-            st.caption(f"{len(_zn)} predictors · {raw_z['date'].min():%Y-%m} – "
-                       f"{raw_z['date'].max():%Y-%m} · {len(raw_z)} months. Defaults "
-                       f"to the {len(_default)} legs that map to shipped features — "
-                       f"{len(_zn)} legs on {len(raw_z)} months is far too thin to "
-                       f"fit all at once; add the ones the manager is likely to "
-                       f"carry.")
-        else:
-            fup = st.file_uploader("Factor returns CSV", type="csv", key="zlegs_up")
-            if fup is None:
-                st.info("Upload the wide factor-return file. With no benchmark in "
-                        "step 1 the fit is on total return, and the market exposure "
-                        "will land in the intercept and any market-correlated leg.")
-                st.stop()
-            raw_z = _read(fup.getvalue())
-            src_label = f"csv:{fup.name}:{len(raw_z)}"
-            zcols = list(raw_z.columns)
-            c1, c2 = st.columns([1, 1])
-            zdate = c1.selectbox("Date", zcols, key="zlegs_date",
-                                 index=_guess_in(zcols, ("date", "month", "yyyymm", "period")))
-            _zn = [c for c in zcols if c != zdate and pd.api.types.is_numeric_dtype(raw_z[c])
-                   and raw_z[c].notna().any()]
-            _zv = pd.to_numeric(raw_z[_zn].stack(), errors="coerce").abs() if _zn else pd.Series(dtype=float)
-            pct = c2.toggle("Values are in percent", value=bool(len(_zv) and _zv.median() > 1.0),
-                            key="zpct", help="OSAP files are. Divides by 100.")
-            _default = _zn
-        legs_sel = st.multiselect(
-            "Legs", _zn, default=_default, key=f"zlegs_{src_label[:4]}",
-            help="With 200 legs and ~200 months even ridge is thin — prefer a "
-                 "chosen subset, or lean on the Kalman estimator's shrinkage.")
-        if not legs_sel:
-            st.warning("Pick at least one leg.")
-            st.stop()
-        zdates = _parse_dates(raw_z[zdate])
-        X = pd.DataFrame({c: monthly_series(zdates, raw_z[c] / (100.0 if pct else 1.0), True)
-                          for c in legs_sel})
-        overlap = X.dropna(how="all").index.intersection(y.index)
-        n_map = sum(1 for c in legs_sel if c in OSAP_CROSSWALK)
-        st.caption(f"{len(legs_sel)} legs · {len(X):,} months · overlap with the "
-                   f"manager **{len(overlap):,}** months · {n_map} leg(s) map to "
-                   f"shipped features for the Concierge handoff.")
-        if len(overlap) < 24:
-            st.error("Fewer than 24 overlapping months — check the date "
-                     "conventions on both files.")
-            st.stop()
-
-    with st.container(border=True, key="zstep3"):
-        st.subheader("3 · Fit",
-                     help="Regress the target on the legs, out of sample.")
-        est, init_years, step_years, window_m, drift_name = _estimator_controls("z")
-        run = st.button("Fit", type="primary", key="zrun")
-        st.caption(f"{len(legs_sel)} legs · {len(overlap):,} overlapping months · "
-                   f"target: {'active return' if active else 'total return'}.")
-
-    _key = (src_label, tuple(legs_sel), pct, est, init_years,
-            step_years, window_m, drift_name, len(y), float(y.sum()))
-    if run:
-        bar = st.progress(0.0, "Fitting…")
-        try:
-            res = _fit(X, y, est, init_years, step_years, window_m, drift_name,
-                       lambda f, m: bar.progress(min(f, 1.0), m))
-            bar.progress(1.0, "Done")
-            st.session_state["legs_res"] = res
-            st.session_state["legs_key"] = _key
-        except Exception as e:
-            bar.empty()
-            st.error(f"Fit failed: {e}")
-
-    res = st.session_state.get("legs_res")
-    if res is None:
-        st.stop()
-    if st.session_state.get("legs_key") != _key:
-        st.info("Settings changed since the last fit — press **Fit** to refresh. "
-                "The results below are from the previous run.")
-    _render_style_results(res, "z", active, crosswalk=OSAP_CROSSWALK)
     st.stop()
 
 
