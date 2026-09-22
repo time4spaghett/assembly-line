@@ -18,6 +18,7 @@ ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
 PAGES = ["tools/edge_concierge.py", "tools/destination_path.py",
+         "tools/hold_propensity.py",
          "tools/learned_edge.py", "tools/neural_edge.py", "tools/factor_edge.py"]
 
 # What each page must actually get through. The Learned Edge stops at its
@@ -32,6 +33,9 @@ EXPECT = {
         "subheaders": ["1 · Panel", "2 · Coverage", "3 · The two edges", "4 · Test",
                        "5 · Unite — pace the trades"],
         "metrics": 11},   # 4 per edge + 3 agreement
+    "tools/hold_propensity.py": {   # stops at the inference button without a key
+        "subheaders": ["1 · Holdings and factors", "2 · Interpret and compile"],
+        "metrics": 0},
     "tools/learned_edge.py": {
         "subheaders": ["1 · Holdings panel"], "metrics": 0},
     "tools/neural_edge.py": {
@@ -42,7 +46,7 @@ EXPECT = {
         "metrics": 0},
 }
 MODULES = ["engine", "data_io", "report", "learned", "nl", "ui", "neural",
-           "concepts", "autoencoder", "pace"]
+           "concepts", "autoencoder", "pace", "hold_prop"]
 
 
 def check_imports() -> list:
@@ -120,6 +124,47 @@ def check_pace() -> list:
     if len(dt_) == 2 and not (dt_["mean_diff"] > 0).all():
         fails.append(f"deferral did not pay with a perfect path signal: "
                      f"{dt_[['side', 'mean_diff']].to_dict('records')}")
+    return fails
+
+
+def check_hold_prop() -> list:
+    """The scoring language on the shipped panel: bad specs must be refused,
+    a nonlinear spec must apply, stay in [0, 1] and be deterministic, and the
+    demo fund's own hidden rule must near-perfectly separate its holdings."""
+    import pandas as pd
+    from engine import feature_columns
+    from hold_prop import (SpecError, apply_scoring_spec, demo_holdings, evaluate,
+                           validate_scoring_spec)
+    fails = []
+    p = pd.read_parquet(ROOT / "data" / "base_panel.parquet")
+    fc = feature_columns(p)
+    for bad in ({"components": [{"factor": "fund_weight", "weight": 1}]},
+                {"components": [{"factor": "no_such_factor", "weight": 1}]},
+                {"score": {"op": "sqrt", "factor": "gpa"}},
+                {"score": {"op": "threshold", "factor": "gpa", "above": 2}}):
+        try:
+            validate_scoring_spec(bad, fc)
+            fails.append(f"accepted an invalid spec: {bad}")
+        except SpecError:
+            pass
+    spec = {"score": {"op": "weighted_sum", "terms": [
+        {"weight": 0.5, "node": {"op": "percentile", "factor": "gpa"}},
+        {"weight": 0.3, "node": {"op": "multiply", "nodes": [
+            {"op": "percentile", "factor": "gpa"}, {"op": "percentile", "factor": "rev_gr_1y"}]}},
+        {"weight": 0.2, "node": {"op": "piecewise", "factor": "vol_12m",
+                                 "points": [[0, 1], [0.6, 1], [1, 0]]}}]}}
+    a = apply_scoring_spec(p, spec, "date", fc)
+    b = apply_scoring_spec(p, spec, "date", fc)
+    if not a["hold_prop_llm"].between(0, 1).all():
+        fails.append("hold_prop_llm outside [0, 1]")
+    if not a["hold_prop_llm"].equals(b["hold_prop_llm"]):
+        fails.append("propagation is not deterministic")
+    if len(a) != len(p) or list(a.columns[:-1]) != list(p.columns):
+        fails.append("apply_scoring_spec changed the frame beyond adding one column")
+    m = p.merge(demo_holdings(p, months=12), on=["date", "ticker"])
+    auc = evaluate(m, "demo_true_score")["auc"].mean()
+    if not auc > 0.9:
+        fails.append(f"demo rule separates its own holdings poorly (AUC {auc:.3f})")
     return fails
 
 
@@ -263,7 +308,8 @@ def check_pages() -> list:
 def main() -> int:
     all_fails = []
     for name, fn in (("imports", check_imports), ("engine", check_engine),
-                     ("pace", check_pace), ("neural", check_neural),
+                     ("pace", check_pace), ("hold_prop", check_hold_prop),
+                     ("neural", check_neural),
                      ("autoencoder", check_autoencoder), ("pages", check_pages)):
         print(f"  {name}…")
         f = fn()

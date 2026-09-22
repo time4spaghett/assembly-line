@@ -91,6 +91,7 @@ h1 {{letter-spacing:-.02em; font-weight:700;}}
 TOOLS = [
     st.Page("tools/edge_concierge.py", title="Edge Concierge", default=True),
     st.Page("tools/destination_path.py", title="Destination & Path"),
+    st.Page("tools/hold_propensity.py", title="Hold Propensity"),
     st.Page("tools/learned_edge.py", title="Learned Edge"),
     st.Page("tools/neural_edge.py", title="Neural Edge"),
     st.Page("tools/factor_edge.py", title="Factor Edge"),

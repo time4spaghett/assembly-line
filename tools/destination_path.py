@@ -398,7 +398,8 @@ with st.container(border=True, key="step1"):
 # the "someone already has a calced edge" case: point the destination at it.
 for _state_key, _tilt_col, _src in (("learned_tilt_panel", "learned_tilt", "Learned Edge"),
                                     ("neural_tilt_panel", "neural_tilt", "Neural Edge"),
-                                    ("ca_tilt_panel", "ca_tilt", "Factor Edge")):
+                                    ("ca_tilt_panel", "ca_tilt", "Factor Edge"),
+                                    ("hold_prop_llm_panel", "hold_prop_llm", "Hold Propensity")):
     _tilt = st.session_state.get(_state_key)
     if _tilt is None or _tilt_col in panel.columns:
         continue
