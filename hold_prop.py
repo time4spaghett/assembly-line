@@ -500,6 +500,184 @@ def infer_hold_propensity(df: pd.DataFrame, date_col: str, id_col: str, factor_c
     return apply_scoring_spec(d, spec, date_col, factor_cols), phil, spec
 
 
+# ── Returns leg: hold_prop_returns ───────────────────────────────────────────
+# A second, independent estimate: what factor mix best explains the fund's
+# realised monthly returns, projected back onto names. Two modes.
+#
+#   rbsa   Sharpe (1992) returns-based style analysis. Sleeves are the
+#          cap-weighted market plus long-only top-quintile style portfolios;
+#          weights are non-negative and sum to one, so the fit reads as
+#          "57% market + 32% low-risk + 11% quality". The market sleeve
+#          absorbs beta; SIZE IS DELIBERATELY NOT A SLEEVE — both real funds
+#          tested hold large caps, and a size sleeve made the leg look good
+#          for that reason alone (cap rank by itself scored higher than the
+#          model). Names are scored on the style weights only.
+#   ridge  Family long-short spreads regressed on the fund's excess return,
+#          ridge with repeated K-fold CV. Signed loadings; less stable.
+#
+# Style families map onto whatever factor columns the panel has; a family
+# with no member present is dropped. Every family is oriented good-side-up.
+STYLE_FAMILIES = {
+    "value": (["fcf_yield", "earn_yield", "btm", "sales_yield"], 1),
+    "quality": (["roic", "gpa", "fcf_margin", "roa", "roe", "op_margin"], 1),
+    "growth": (["rev_gr_3y", "rev_gr_1y"], 1),
+    "fund_mom": (["qearn_mom", "ebit_mom", "earn_mom", "roe_mom"], 1),
+    "momentum": (["mom_12_1", "high_52w", "mom_6_1"], 1),
+    "low_risk": (["vol_12m", "max_ret_1m", "beta_12m", "vol_1m", "vol_63d"], -1),
+    "low_leverage": (["leverage"], -1),
+    "low_accruals": (["accruals"], -1),
+    "low_dilution": (["dilution_1y"], -1),
+}
+
+
+def style_scores(df: pd.DataFrame, date_col: str, factor_cols: Iterable[str],
+                 families: dict | None = None) -> pd.DataFrame:
+    """Per-name style composites in [0, 1]: mean percentile of the family's
+    present members, flipped for 'lower is better' families. Columns = families found."""
+    fam = families or STYLE_FAMILIES
+    fc = set(factor_cols)
+    out = {}
+    for name, (members, sign) in fam.items():
+        present = [m for m in members if m in fc and m in df.columns]
+        if not present:
+            continue
+        r = df.groupby(date_col)[present].rank(pct=True).mean(axis=1).fillna(0.5)
+        out[name] = (1.0 - r) if sign < 0 else r
+    if not out:
+        raise SpecError("no style family has a member among the factor columns")
+    return pd.DataFrame(out, index=df.index)
+
+
+def style_sleeve_returns(df: pd.DataFrame, styles: pd.DataFrame, date_col: str,
+                         ret_col: str = "fwd_1m", mcap_col: str = "log_mcap") -> pd.DataFrame:
+    """Monthly returns of the sleeves: long-only top quintile of each style
+    (equal-weight) and the cap-weighted market ('mkt'). Index = dates."""
+    r = pd.to_numeric(df[ret_col], errors="coerce")
+    dates = df[date_col]
+    out = {}
+    for s in styles.columns:
+        q = styles[s].groupby(dates).transform(lambda x: x.rank(pct=True))
+        out[s] = r[q > 0.8].groupby(dates[q > 0.8]).mean()
+    if mcap_col in df.columns:
+        w = np.exp(pd.to_numeric(df[mcap_col], errors="coerce")).fillna(0.0)
+        out["mkt"] = (w * r).groupby(dates).sum() / w.groupby(dates).sum()
+    else:
+        out["mkt"] = r.groupby(dates).mean()
+    return pd.DataFrame(out).dropna(how="all")
+
+
+def implied_fund_returns(df: pd.DataFrame, date_col: str, ret_col: str = "fwd_1m") -> pd.Series:
+    """Fund monthly return implied by its own holdings: each date's book
+    (renormalised over names with a return) held for the next period.
+    Dates with no holdings carry the most recent book forward (≤ 4 months),
+    so quarterly 13F snapshots still yield a monthly-ish series."""
+    d = df[[date_col, "ticker" if "ticker" in df.columns else df.columns[1], "fund_weight", ret_col]].copy()
+    d.columns = ["date", "id", "w", "r"]
+    d["date"] = pd.to_datetime(d["date"])
+    books = {dt: g[g.w > 0][["id", "w"]] for dt, g in d.groupby("date") if (g.w > 0).any()}
+    bdates = sorted(books)
+    out = {}
+    for dt, g in d.groupby("date"):
+        prior = [b for b in bdates if b <= dt and (dt - b).days <= 125]
+        if not prior:
+            continue
+        book = books[prior[-1]]
+        x = g.merge(book, on="id", suffixes=("", "_b")).dropna(subset=["r"])
+        if len(x) < 3:
+            continue
+        out[dt] = float((x.w_b / x.w_b.sum() * x.r).sum())
+    return pd.Series(out).sort_index()
+
+
+def fit_returns_leg(fund_ret: pd.Series, sleeves: pd.DataFrame, mode: str = "rbsa") -> dict:
+    """
+    Fit the fund's monthly returns to the sleeves. Returns {"mode", "weights"
+    (style weights used for scoring), "market" (rbsa only), "r2", "n_months",
+    "text" (one readable line)}.
+    """
+    idx = fund_ret.index.intersection(sleeves.dropna().index)
+    if len(idx) < 12:
+        raise SpecError(f"only {len(idx)} overlapping months of fund and sleeve returns; need 12+")
+    y = fund_ret.loc[idx].astype(float)
+    X = sleeves.loc[idx]
+    styles = [c for c in X.columns if c != "mkt"]
+    if mode == "rbsa":
+        from scipy.optimize import minimize
+        A, b = X.to_numpy(float), y.to_numpy(float)
+        n = A.shape[1]
+        res = minimize(lambda w: float(((A @ w - b) ** 2).sum()), np.ones(n) / n,
+                       bounds=[(0.0, 1.0)] * n,
+                       constraints={"type": "eq", "fun": lambda w: w.sum() - 1.0})
+        w = pd.Series(res.x, index=X.columns).clip(lower=0.0)
+        r2 = 1.0 - float(((A @ res.x - b) ** 2).sum()) / float(((b - b.mean()) ** 2).sum())
+        sty = w[styles]
+        weights = sty / sty.sum() if sty.sum() > 1e-9 else sty
+        parts = [f"{w['mkt']:.0%} market"] + [f"{v:.0%} {k.replace('_', ' ')}"
+                                             for k, v in sty.sort_values(ascending=False).items() if v >= 0.01]
+        return {"mode": "rbsa", "weights": weights.to_dict(), "market": float(w.get("mkt", 0.0)),
+                "r2": r2, "n_months": int(len(idx)), "text": " + ".join(parts)}
+    # ridge on family long-short spreads (top quintile − bottom quintile) vs excess return
+    from sklearn.linear_model import Ridge
+    from sklearn.model_selection import RepeatedKFold, cross_val_score
+    ex = y - X["mkt"]
+    Xs = X[styles]
+    Xs = (Xs - Xs.mean()) / Xs.std().replace(0.0, np.nan)
+    Xs = Xs.dropna(axis=1)
+    cv = RepeatedKFold(n_splits=5, n_repeats=10, random_state=0)
+    grid = np.logspace(-1, 3, 20)
+    sc = [cross_val_score(Ridge(alpha=a), Xs, ex, cv=cv).mean() for a in grid]
+    a = float(grid[int(np.argmax(sc))])
+    m = Ridge(alpha=a).fit(Xs, ex)
+    w = pd.Series(m.coef_, index=Xs.columns)
+    parts = [f"{k.replace('_', ' ')} {v * 1e4:+.0f}bp" for k, v in w.sort_values(key=abs, ascending=False).items()]
+    return {"mode": "ridge", "weights": w.to_dict(), "market": 1.0, "r2": float(max(sc)),
+            "alpha": a, "n_months": int(len(idx)), "text": ", ".join(parts)}
+
+
+def apply_returns_leg(df: pd.DataFrame, styles: pd.DataFrame, fit: dict, date_col: str,
+                      out_col: str = "hold_prop_returns") -> pd.DataFrame:
+    """Score = Σ weight_style · style percentile, ranked within date → [0, 1]."""
+    w = pd.Series(fit["weights"])
+    cols = [c for c in w.index if c in styles.columns]
+    raw = (styles[cols] * w[cols]).sum(axis=1)
+    out = df.copy()
+    out[out_col] = raw.groupby(out[date_col]).rank(pct=True).fillna(0.5).clip(0.0, 1.0)
+    return out
+
+
+def composite(df: pd.DataFrame, cols: Iterable[str], out_col: str = "hold_prop_ensemble") -> pd.DataFrame:
+    """Plain average of legs (each already in [0, 1])."""
+    out = df.copy()
+    out[out_col] = out[list(cols)].mean(axis=1).clip(0.0, 1.0)
+    return out
+
+
+def evaluate_weighted(df: pd.DataFrame, score_col: str, date_col: str = "date",
+                      top_n: int = 100, min_names: int = 20) -> pd.DataFrame:
+    """
+    Where the fund's money lands, per date: AUC (membership), weight-weighted
+    AUC (each held name counts by its weight), and the share of fund weight
+    inside the score's top `top_n` names. The right yardstick for a diffuse
+    book, where membership alone mostly says "large cap".
+    """
+    from sklearn.metrics import roc_auc_score
+    rows = []
+    for dt, g in df.groupby(date_col):
+        w = pd.to_numeric(g["fund_weight"], errors="coerce").fillna(0.0)
+        held = (w > 0).astype(int)
+        s = g[score_col]
+        ok = s.notna()
+        if ok.sum() < min_names or held[ok].nunique() < 2:
+            continue
+        sw = np.where(w > 0, w / w.sum() * held.sum(), 1.0)
+        rk = s.rank(ascending=False)
+        rows.append({"date": dt, "auc": float(roc_auc_score(held[ok], s[ok])),
+                     "weighted_auc": float(roc_auc_score(held[ok], s[ok], sample_weight=sw[ok])),
+                     "weight_in_top": float((w / w.sum())[rk <= top_n].sum()),
+                     "n_held": int(held.sum())})
+    return pd.DataFrame(rows).set_index("date") if rows else pd.DataFrame()
+
+
 # ── Demo fund for the shipped panel ──────────────────────────────────────────
 
 # A hidden philosophy the demo fund follows, so the pipeline can be judged on

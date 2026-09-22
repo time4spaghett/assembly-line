@@ -165,6 +165,26 @@ def check_hold_prop() -> list:
     auc = evaluate(m, "demo_true_score")["auc"].mean()
     if not auc > 0.9:
         fails.append(f"demo rule separates its own holdings poorly (AUC {auc:.3f})")
+    # returns leg mechanics: sleeves, implied returns, RBSA weights, projection, composite
+    from hold_prop import (apply_returns_leg, composite, evaluate_weighted, fit_returns_leg,
+                           implied_fund_returns, style_scores, style_sleeve_returns)
+    m24 = p.merge(demo_holdings(p, months=24), on=["date", "ticker"])
+    sty = style_scores(m24, "date", fc)
+    if not sty.apply(lambda s: s.between(0, 1).all()).all():
+        fails.append("style scores outside [0, 1]")
+    fr = implied_fund_returns(m24, "date")
+    fit = fit_returns_leg(fr, style_sleeve_returns(m24, sty, "date"), "rbsa")
+    w = fit["weights"]
+    if any(v < -1e-9 for v in w.values()) or abs(sum(w.values()) - 1.0) > 1e-6:
+        fails.append(f"RBSA style weights not a non-negative simplex: {w}")
+    r = apply_returns_leg(m24, sty, fit, "date")
+    r = composite(r, ["demo_true_score", "hold_prop_returns"])
+    for c in ("hold_prop_returns", "hold_prop_ensemble"):
+        if not r[c].between(0, 1).all():
+            fails.append(f"{c} outside [0, 1]")
+    ew = evaluate_weighted(r, "hold_prop_ensemble")
+    if not (len(ew) and ew["weight_in_top"].between(0, 1).all()):
+        fails.append("weighted evaluation failed")
     return fails
 
 

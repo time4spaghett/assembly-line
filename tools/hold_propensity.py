@@ -26,9 +26,11 @@ import streamlit as st
 from data_io import load_base_panel
 from engine import feature_columns
 from hold_prop import (DEMO_PHILOSOPHY, DEMO_RULE, FACTOR_DEFS, HOLDINGS_COLS,
-                       SpecError, add_weight_columns, apply_scoring_spec,
-                       demo_holdings, evaluate, infer_philosophy, snapshot,
-                       spec_factors, validate_scoring_spec)
+                       SpecError, add_weight_columns, apply_returns_leg,
+                       apply_scoring_spec, composite, demo_holdings, evaluate,
+                       evaluate_weighted, fit_returns_leg, implied_fund_returns,
+                       infer_philosophy, snapshot, spec_factors,
+                       style_scores, style_sleeve_returns, validate_scoring_spec)
 from ui import BLUE, INK_2, RED, style
 
 try:
@@ -222,22 +224,103 @@ with st.container(border=True, key="hstep3"):
                f"suggestions, the held ones with a low score are where the fund departs "
                f"from its own apparent philosophy.")
 
-    d1, d2, d3, d4 = st.columns(4)
-    d1.download_button("Philosophy (txt)", st.session_state.get("hp_phil", ""),
-                       "philosophy.txt", "text/plain", width="stretch")
-    d2.download_button("Scoring spec (json)", json.dumps(spec, indent=2),
-                       "scoring_spec.json", "application/json", width="stretch")
-    d3.download_button("Scored panel (csv)", scored.to_csv(index=False),
-                       "hold_prop_llm.csv", "text/csv", width="stretch",
-                       help="The input panel unchanged, plus hold_prop_llm.")
-    if d4.button("Send to Edge Concierge", width="stretch",
-                 help="Becomes a feature there, joined on date and ID."):
-        st.session_state["hold_prop_llm_panel"] = scored[[date_col, id_col, OUT_COL]].rename(
-            columns={date_col: "date", id_col: "secid"})
-        st.toast("hold_prop_llm is available in the Concierge and Destination & Path.")
     if st.session_state.get("hp_raw"):
         with st.expander("Raw model response"):
             st.text(st.session_state["hp_raw"])
+
+# ── 4 · Returns leg and composite ────────────────────────────────────────────
+# A second, independent estimate from the fund's realised returns; the
+# composite is the plain average of the two legs.
+with st.container(border=True, key="hstep4"):
+    st.subheader("4 · Returns leg and composite", help="What factor mix best explains "
+                 "the fund's monthly returns, projected onto names. RBSA reads as "
+                 "'57% market + 32% low-risk + 11% quality' — the market sleeve absorbs "
+                 "beta, size is deliberately not a style. The composite averages this "
+                 "with the LLM leg.")
+    r1, r2, r3 = st.columns([2, 2, 3])
+    mode = r1.radio("Model", ["rbsa", "ridge"], key="hp_rmode", horizontal=True,
+                    format_func=lambda m: {"rbsa": "Sharpe RBSA (default)", "ridge": "Ridge on spreads"}[m],
+                    help="RBSA: non-negative weights summing to one over the market and "
+                         "long-only style sleeves. Ridge: signed loadings on long-short "
+                         "family spreads; needs 60+ months to be stable.")
+    rsrc = r2.radio("Fund returns", ["Implied by holdings", "Upload monthly NAV returns"],
+                    key="hp_rsrc",
+                    help="Implied: each date's book held for the next period, from the "
+                         "panel's own forward returns (carried forward up to 4 months "
+                         "between holdings snapshots). Better: the fund's actual NAV "
+                         "return series.")
+    fund_ret = None
+    if rsrc.startswith("Upload"):
+        rup = r3.file_uploader("CSV: date, return (monthly)", type="csv", key="hp_rup")
+        if rup is not None:
+            rr = pd.read_csv(io.BytesIO(rup.getvalue()))
+            rr.iloc[:, 0] = pd.to_datetime(rr.iloc[:, 0], errors="coerce")
+            rr = rr.dropna()
+            # snap each NAV month to the panel's nearest date at or after month end
+            pdates = pd.DatetimeIndex(sorted(scored[date_col].unique()))
+            snapd = [pdates[pdates.searchsorted(d - pd.Timedelta(days=6))] if pdates.searchsorted(d - pd.Timedelta(days=6)) < len(pdates) else pd.NaT for d in rr.iloc[:, 0]]
+            fund_ret = pd.Series(pd.to_numeric(rr.iloc[:, 1], errors="coerce").to_numpy(), index=snapd).dropna()
+            fund_ret = fund_ret[~fund_ret.index.isna()]
+    else:
+        if "fwd_1m" in scored.columns:
+            fund_ret = implied_fund_returns(scored, date_col)
+        else:
+            r3.warning("The panel has no 1-month forward returns, so returns can't be implied.")
+
+
+@st.cache_data(show_spinner="Fitting the returns leg…")
+def cached_returns(frame: pd.DataFrame, fcs: tuple, date_col: str, fund_ret: pd.Series, mode: str):
+    sty = style_scores(frame, date_col, list(fcs))
+    sleeves = style_sleeve_returns(frame, sty, date_col)
+    fit = fit_returns_leg(fund_ret, sleeves, mode)
+    return apply_returns_leg(frame, sty, fit, date_col), fit
+
+
+if fund_ret is not None and len(fund_ret) >= 12 and "fwd_1m" in scored.columns:
+    try:
+        scored, rfit = cached_returns(scored, tuple(factor_cols), date_col, fund_ret, mode)
+        scored = composite(scored, [OUT_COL, "hold_prop_returns"])
+        st.markdown(f"**Returns leg ({rfit['mode']}, {rfit['n_months']} months, R² {rfit['r2']:.2f}):** "
+                    f"{rfit['text']}")
+        legs = {"LLM leg": OUT_COL, "Returns leg": "hold_prop_returns", "Composite": "hold_prop_ensemble"}
+        rows = []
+        for lbl, c in legs.items():
+            e = evaluate_weighted(scored, c, date_col)
+            if len(e):
+                rows.append({"": lbl, "AUC (membership)": e["auc"].mean(), "Weighted AUC": e["weighted_auc"].mean(),
+                             "Fund $ in score's top 100": e["weight_in_top"].mean(), "Worst-quarter AUC": e["auc"].min()})
+        if rows:
+            st.dataframe(pd.DataFrame(rows).set_index("").style.format({
+                "AUC (membership)": "{:.3f}", "Weighted AUC": "{:.3f}",
+                "Fund $ in score's top 100": "{:.0%}", "Worst-quarter AUC": "{:.3f}"}), width="stretch")
+            st.caption("Means over the dates that have holdings. *Weighted AUC* counts each held "
+                       "name by its weight; *fund $ in top 100* is the share of the book the "
+                       "score would have put in its 100 favourite names (random ≈ 100 / names "
+                       "in coverage). For a diffuse book membership alone mostly says 'large "
+                       "cap' — judge it on where the money sits. The returns leg is fit on "
+                       "every month available, including the ones scored here.")
+        sc_ = scored[["hold_prop_llm", "hold_prop_returns"]].corr(method="spearman").iloc[0, 1]
+        st.caption(f"The two legs' scores are {sc_:+.2f} rank-correlated — the further from 1, "
+                   f"the more the composite can add.")
+    except SpecError as e:
+        st.warning(str(e))
+elif fund_ret is not None:
+    st.info(f"Only {len(fund_ret)} months of fund returns — the returns leg needs 12 or more.")
+
+HANDOFF_COL = "hold_prop_ensemble" if "hold_prop_ensemble" in scored.columns else OUT_COL
+d1, d2, d3, d4 = st.columns(4)
+d1.download_button("Philosophy (txt)", st.session_state.get("hp_phil", ""),
+                   "philosophy.txt", "text/plain", width="stretch")
+d2.download_button("Scoring spec (json)", json.dumps(spec, indent=2),
+                   "scoring_spec.json", "application/json", width="stretch")
+d3.download_button("Scored panel (csv)", scored.to_csv(index=False),
+                   "hold_prop.csv", "text/csv", width="stretch",
+                   help="The input panel unchanged, plus every hold_prop_* column computed.")
+if d4.button("Send to Edge Concierge", width="stretch",
+             help=f"`{HANDOFF_COL}` becomes a feature there, joined on date and ID."):
+    st.session_state["hold_prop_llm_panel"] = scored[[date_col, id_col, HANDOFF_COL]].rename(
+        columns={date_col: "date", id_col: "secid", HANDOFF_COL: OUT_COL})
+    st.toast(f"{HANDOFF_COL} is available in the Concierge and Destination & Path as hold_prop_llm.")
 
 with st.expander("How this works", expanded=False):
     st.markdown("""
