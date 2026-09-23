@@ -16,6 +16,13 @@ def _fmt_pct(x, dp=1):
     return "—" if x is None or not np.isfinite(x) else f"{x:+.{dp}%}"
 
 
+def _fmt(x, dp=2):
+    # the record collapses NaN to None so its JSON stays valid; a bare
+    # f-string on None is a TypeError, and a run with an empty L/S series
+    # or zero vol produces exactly that
+    return "—" if x is None or not np.isfinite(x) else f"{x:.{dp}f}"
+
+
 def _validation_html(v: dict | None) -> str:
     """The holdout result, stated before the charts rather than after them."""
     if not v:
@@ -93,10 +100,10 @@ def build_report(sig: str, title: str, record: dict, figs_html: list[str],
     universe_html = ("<p class='universe'>Universe &nbsp;"
                      + " &nbsp;·&nbsp; ".join(universe_bits) + "</p>")
 
-    kpis = [("Mean IC", f"{r['mean_ic']:.4f}"), ("Newey-West t", f"{r['nw_t_stat']:.2f}"),
-            ("IC IR", f"{r['ic_ir']:.2f}"),
+    kpis = [("Mean IC", _fmt(r['mean_ic'], 4)), ("Newey-West t", _fmt(r['nw_t_stat'])),
+            ("IC IR", _fmt(r['ic_ir'])),
             ("Top−bottom spread", _fmt_pct(r["spread_ann"])),
-            ("L/S Sharpe", f"{r['ls_sharpe']:.2f}")]
+            ("L/S Sharpe", _fmt(r['ls_sharpe']))]
     kpi_html = "".join(f"<div class='kpi'><span>{k}</span><strong>{v}</strong></div>"
                        for k, v in kpis)
     caveat_html = "".join(f"<li>{c}</li>" for c in caveats)
