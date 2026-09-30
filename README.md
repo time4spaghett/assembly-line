@@ -29,19 +29,17 @@ The app loads a worked example rather than an empty form:
 edge = rank(fcf_yield) + 0.5·rank(gpa) − 0.5·rank(accruals) − 0.5·rank(asset_gr)
 ```
 
-excluding Communication Services. Cash-generative, profitable, clean-accounting,
-not over-expanding. At the default 1-month horizon it scores IC **+0.018**
-(Newey-West t **+3.23**), a **+7.8%** annualized top-minus-bottom spread and a
-**0.81** long-short Sharpe; the quintile ladder runs **7.0% → 14.8%** (bars) or
-**5.3% → 12.9%** compounded. It holds at 12 months too (IC +0.052, t +2.79), and
-stays positive in every era of the sample — weakest post-2016, as value generally
-has been. Communication Services is dropped because it is the only sector where
-the signal fails outright (IC −0.003).
+restricted to the two consumer sectors, with positive 6-month momentum as a
+screen. Cash-generative, profitable, clean-accounting, not over-expanding. At the
+default 1-month horizon it scores IC **+0.021** (Newey-West t **+2.1**), a
+**+5.4%** annualized top-minus-bottom spread and a **0.41** long-short Sharpe.
+It is a 1-month signal: at 12 months the IC holds (+0.023) but t falls to +1.2.
 
-Two notes the app states on the charts. The bars are an *arithmetic* mean of
-overlapping windows — what the signal predicts — and sit above the compounded
-CAGR beside them by roughly half the variance; that gap is widest for the most
-volatile ntile. And the cumulative and long-short curves are always built from
+Two notes the app states on the charts. The bars are a *geometric* mean of
+overlapping windows, annualized — what the signal predicts at that horizon —
+and track the compounded CAGR beside them closely at 1 month, diverging
+somewhat at longer horizons because they answer a different question. And the
+cumulative and long-short curves are always built from
 non-overlapping 1-month returns, so the horizon selector moves the bars, IC and
 t-stat but deliberately not those two charts.
 
@@ -49,7 +47,7 @@ Clear the rows and build your own; the table is the source of truth.
 
 ## Benchmarks
 
-The ntile charts compare against a benchmark you choose in the sidebar:
+The ntile charts compare against a benchmark you choose in step 5 (Test):
 equal-weight universe (default), cap-weighted universe, one of seven index ETFs
 (SPY, RSP, MDY, IWM, IWD, IWF, QQQ), or a column in your own panel.
 
@@ -113,9 +111,9 @@ value is perturbed by `v * eps`, with `eps ~ N(0, sigma)` clipped to a hard
 bound and ~99.7% of draws are unclipped). It is **seeded** (`20260901`), so the
 same input always jitters the same way; NaNs stay NaN and exact zeros stay zero.
 
-Effect on results is nil at this magnitude — the default edge scores
-IC +0.0515 / t +2.79 / spread +4.5% / Sharpe 0.81 both with and without it. The
-pristine panel is kept alongside as `data/base_panel_clean.parquet`.
+Effect on results is nil at this magnitude — a ±0.05% perturbation almost never
+swaps two names' ranks, so the rank-based metrics are effectively unchanged.
+Build without `--jitter` for the pristine panel.
 
 Regenerate with `--jitter` (optionally `--jitter-rel` / `--seed`):
 

@@ -465,19 +465,6 @@ def kalman_style(X: pd.DataFrame, y: pd.Series,
         pooled_corr=pooled_corr, pooled_r2=pooled_r2, skipped=skipped)
 
 
-def full_history_style(X: pd.DataFrame, y: pd.Series) -> dict:
-    """Fit once on every month, to describe the style. In-sample; never scored from."""
-    X, y, skipped = align(X, y)
-    if len(y) < MIN_TRAIN_MONTHS:
-        return {"loadings": pd.Series(dtype=float), "r2": np.nan,
-                "alpha_ann": np.nan, "n_months": int(len(y)), "skipped": skipped}
-    beta, b0 = _ridge_fit(X, y)
-    yhat = X @ beta + b0
-    r2 = float(1 - ((y - yhat) ** 2).sum() / ((y - y.mean()) ** 2).sum())
-    return {"loadings": beta.sort_values(key=abs, ascending=False), "r2": r2,
-            "alpha_ann": b0 * 12, "n_months": int(len(y)), "skipped": skipped}
-
-
 # ── What the model actually keys on, over the whole history ──────────────────
 # The walk-forward exists to produce honest scores; it is a poor lens on what
 # the model learned, because each fold sees a different slice. For a picture of

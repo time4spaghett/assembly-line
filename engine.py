@@ -254,8 +254,8 @@ def _h_forward(monthly: pd.Series, h: int) -> pd.Series:
 
     monthly[t] is the return over the month after t, so the h-month forward
     return at t compounds monthly[t..t+h-1]. Needed so a benchmark is measured
-    the same way as the ntile bars (arithmetic mean of overlapping h-month
-    returns) instead of being annualized off a 1-month base.
+    the same way as the ntile bars (geometric mean of overlapping h-month
+    returns, see _geo_ann) instead of being annualized off a 1-month base.
     """
     if h <= 1:
         return monthly
@@ -365,8 +365,8 @@ def quantile_analysis(panel: pd.DataFrame, comp: pd.Series, horizon: str,
     return {
         "q_cagr": pd.Series({q: _cagr(q_cum[q]) for q in q_cum.columns}),
         "bench_cagr": _cagr(bench_cum),
-        "bench_cum": bench_cum,          # equal-weight universe, cumulative
-        "bench_ann": bench_ann,          # equal-weight universe, annualized
+        "bench_cum": bench_cum,          # the chosen benchmark, cumulative
+        "bench_ann": bench_ann,          # the chosen benchmark, annualized (geometric)
         "q_cum": q_cum,                  # DataFrame: cumulative curve per quantile
         "q_ann_returns": q_ann,          # Series indexed by quantile 1..n_q
         "spread_ann": float(q_ann.iloc[-1] - q_ann.iloc[0]) if len(q_ann) > 1 else np.nan,

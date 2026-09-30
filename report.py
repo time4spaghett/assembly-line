@@ -180,7 +180,7 @@ def build_report(sig: str, title: str, record: dict, figs_html: list[str],
 </div>
 <h2>Ntile returns</h2>
 <div class="cols"><div><table>
-<tr><th>Ntile</th><th>Mean fwd (ann.)</th><th>Compounded CAGR</th></tr>{ntiles}
+<tr><th>Ntile</th><th>Geometric mean fwd (ann.)</th><th>Compounded CAGR</th></tr>{ntiles}
 <tr><td><b>{te['benchmark']}</b></td><td class="num">{_fmt_pct(r['benchmark_ann'])}</td>
 <td class="num">{_fmt_pct(r['benchmark_cagr'])}</td></tr>
 </table></div><div>{sector_table}</div></div>

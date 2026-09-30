@@ -104,6 +104,19 @@ def ambiguous_date(col: pd.Series) -> str | None:
     return str(col[disagree].iloc[0]) if disagree.any() else None
 
 
+def parse_dates(s: pd.Series) -> pd.Series:
+    """
+    Dates as written, or yyyymm integers — never nanosecond epochs.
+
+    pd.to_datetime reads an integer like 200101 as 200,101 ns after 1970, so a
+    yyyymm column silently collapses every row into one day in 1970.
+    """
+    v = pd.to_numeric(s, errors="coerce")
+    if v.notna().all() and v.between(190001, 210012).all() and (v % 1 == 0).all():
+        return pd.to_datetime(v.astype(int).astype(str), format="%Y%m", errors="coerce")
+    return pd.to_datetime(s, errors="coerce")
+
+
 def normalize_csv(raw: pd.DataFrame, id_col: str, date_col: str,
                   sector_col: str | None = None, industry_col: str | None = None,
                   price_col: str | None = None,
@@ -119,7 +132,7 @@ def normalize_csv(raw: pd.DataFrame, id_col: str, date_col: str,
     """
     df = raw.copy()
     df["ticker"] = df[id_col].astype(str).str.strip().str.upper()
-    df["date"] = pd.to_datetime(df[date_col], errors="coerce")
+    df["date"] = parse_dates(df[date_col])
     df = df.dropna(subset=["date"])
     df["month"] = df["date"].dt.to_period("M")
     # one row per (ticker, month): keep the last observation
@@ -131,7 +144,6 @@ def normalize_csv(raw: pd.DataFrame, id_col: str, date_col: str,
     used = {id_col, date_col, sector_col, industry_col} - {None}
     if fwd_map:
         df = df.rename(columns={src: h for h, src in fwd_map.items()})
-        used |= set()  # renamed in place
     if price_col:
         df = _fwd_from_prices(df, price_col)
         used.add(price_col)

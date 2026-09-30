@@ -23,25 +23,25 @@ BLUE, RED, YELLOW = "#1b4d9b", "#c4302b", "#e3b505"
 _STEP_COLOURS = [BLUE, RED, YELLOW, BLUE, RED]
 
 _step_css = "".join(
-    f'.st-key-step{i+1} > div:first-child::before{{background:{c};}}'
-    for i, c in enumerate(_STEP_COLOURS))
+    f'.st-key-{p}step{i+1} > div:first-child::before{{background:{c};}}'
+    for p in ("", "l", "r") for i, c in enumerate(_STEP_COLOURS))
 
 st.markdown(f"""<style>
 .block-container {{max-width:1180px; padding-top:2.2rem;}}
 .stApp {{background:{GROUND};}}
 
 /* step blocks: white fields bounded by black lines, not soft grey cards */
-[class*="st-key-step"] {{
+:is([class*="st-key-step"], [class*="st-key-lstep"], [class*="st-key-rstep"]) {{
   background:{CARD}; border:1px solid {RULE} !important; border-radius:0 !important;
   padding:1.15rem 1.35rem 1.35rem !important; margin-bottom:1.05rem;
 }}
 /* the one flourish: a small primary square marking each step */
-[class*="st-key-step"] > div:first-child {{position:relative; padding-left:1.15rem;}}
-[class*="st-key-step"] > div:first-child::before {{
+:is([class*="st-key-step"], [class*="st-key-lstep"], [class*="st-key-rstep"]) > div:first-child {{position:relative; padding-left:1.15rem;}}
+:is([class*="st-key-step"], [class*="st-key-lstep"], [class*="st-key-rstep"]) > div:first-child::before {{
   content:""; position:absolute; left:0; top:.62rem; width:.55rem; height:.55rem;
 }}
 {_step_css}
-[class*="st-key-step"] h3 {{
+:is([class*="st-key-step"], [class*="st-key-lstep"], [class*="st-key-rstep"]) h3 {{
   font-size:1.02rem !important; font-weight:600 !important; letter-spacing:.01em;
   color:{INK}; padding:0 0 .35rem 0 !important;
 }}

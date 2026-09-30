@@ -19,7 +19,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from data_io import load_base_panel, load_short_panel, normalize_csv
+from data_io import load_base_panel, load_short_panel, normalize_csv, parse_dates
 from engine import feature_columns
 from learned import (INIT_TRAIN_YEARS, KALMAN_DRIFT, MARKET_LEG, PROB_COL,
                      SIZE_GROUPS, STEP_YEARS, build_learned_style_panel,
@@ -65,89 +65,52 @@ def _read(data: bytes) -> pd.DataFrame:
 EST_EXP, EST_ROLL, EST_KAL = "Expanding window", "Rolling window", "Kalman filter"
 
 
-def _parse_dates(s: pd.Series) -> pd.Series:
-    """Dates as written, or yyyymm integers — never epochs."""
-    v = pd.to_numeric(s, errors="coerce")
-    if v.notna().all() and v.between(190001, 210012).all():
-        return pd.to_datetime(v.astype(int).astype(str), format="%Y%m", errors="coerce")
-    return pd.to_datetime(s, errors="coerce")
-
-
-def _manager_intake(prefix: str, with_benchmark: bool):
-    """
-    Step 1 of both returns flows. Returns the monthly target series (the
-    manager's return, or active return against a benchmark column) or stops
-    the script with guidance if nothing is uploaded yet.
-    """
+def _manager_intake(prefix: str) -> pd.Series:
+    """Step 1: the manager's monthly return series, or stop with guidance."""
     with st.container(border=True, key=f"{prefix}step1"):
         st.subheader(
             "1 · Manager returns",
-            help="One row per period: a date and the manager's return"
-                 + (", with the benchmark's return alongside if you want to fit "
-                    "active return" if with_benchmark else "")
-                 + ". Monthly is the natural grain; daily rows are compounded "
-                   "into months. Values above 1 in magnitude are read as percent.")
+            help="One row per period: a date and the manager's return. Monthly "
+                 "is the natural grain; daily rows are compounded into months. "
+                 "Values above 1 in magnitude are read as percent.")
         up = st.file_uploader("Manager returns CSV", type="csv", key=f"{prefix}up")
         st.caption("Held in memory for this session only — never written to disk, "
                    "never shared between users, and dropped when you close the tab.")
         if up is None:
             st.info("Upload the manager's return series to begin — `date` and a "
-                    "return column" + (", plus the benchmark's return for an "
-                                       "active-return fit." if with_benchmark
-                                       else ". The factor legs come from step 2."))
+                    "return column. The factor legs come from step 2.")
             st.stop()
         raw = _read(up.getvalue())
         cols = list(raw.columns)
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3 = st.columns(3)
         date_col = c1.selectbox("Date", cols, key=f"{prefix}date",
                                 index=_guess_in(cols, ("date", "month", "period")))
         ret_col = c2.selectbox(
             "Return", cols, key=f"{prefix}ret",
             index=_guess_in(cols, ("return", "ret", "manager", "portfolio",
                                    "fund", "strategy", "pnl"), min(1, len(cols) - 1)))
-        bmk_col = "(none)"
-        if with_benchmark:
-            bmk_col = c3.selectbox(
-                "Benchmark (optional)", ["(none)"] + cols, key=f"{prefix}bmk",
-                index=_guess_in(cols, ("bench", "bmk", "index"), -1) + 1,
-                help="If set, the target is **active return** — fund minus "
-                     "benchmark — so the market exposure cancels and the legs "
-                     "need no market column. Assumes beta ≈ 1 to the benchmark; "
-                     "the caption shows the realized beta so you can check.")
-        month_end = c4.selectbox(
+        month_end = c3.selectbox(
             "Each date is the…", ["end of the period it covers", "start"],
             key=f"{prefix}conv",
             help="The usual convention for a return series is a month-end date "
                  "labelling the month just finished.") == "end of the period it covers"
-        dates = _parse_dates(raw[date_col])
         _mv = pd.to_numeric(raw[ret_col], errors="coerce").abs()
         scale = 100.0 if _mv.median() > 1.0 else 1.0
-        fund = monthly_series(dates, raw[ret_col] / scale, month_end)
-        y, note = fund, ""
-        if bmk_col != "(none)":
-            bmk = monthly_series(dates, raw[bmk_col] / scale, month_end)
-            both = pd.DataFrame({"f": fund, "b": bmk}).dropna()
-            if len(both) < 12:
-                st.error("Fund and benchmark overlap on fewer than 12 months.")
-                st.stop()
-            beta = float(both.cov().iloc[0, 1] / both["b"].var()) if both["b"].var() else float("nan")
-            y = (both["f"] - both["b"]).rename("active")
-            note = (f" · **active return** vs `{bmk_col}` · realized beta "
-                    f"**{beta:.2f}** · tracking error {y.std() * 12 ** 0.5:.1%}")
+        y = monthly_series(parse_dates(raw[date_col]), raw[ret_col] / scale, month_end)
         if len(y) < 12:
             st.error(f"Only {len(y)} months — need a few years.")
             st.stop()
         _ann = (1 + y).prod() ** (12 / len(y)) - 1
         st.caption(
             f"{len(y):,} months · {y.index.min()} – {y.index.max()} · "
-            f"{_ann:+.1%}/yr, vol {y.std() * 12 ** 0.5:.1%}" + note
+            f"{_ann:+.1%}/yr, vol {y.std() * 12 ** 0.5:.1%}"
             + (" · values read as **percent** and divided by 100" if scale > 1 else "")
             + (f" · {len(raw):,} rows compounded into months" if len(raw) > len(y) else ""))
-    return y, bmk_col != "(none)"
+    return y
 
 
 def _estimator_controls(prefix: str):
-    """Step 'Fit' controls shared by both returns flows."""
+    """The estimator choice and its controls, for the Fit step."""
     est = st.radio("Estimator", [EST_EXP, EST_ROLL, EST_KAL], horizontal=True,
                    key=f"{prefix}est",
                    help="**Expanding**: each fold fits on all prior months and "
@@ -164,9 +127,9 @@ def _estimator_controls(prefix: str):
     drift_name = "medium"
     if est == EST_ROLL:
         window_m = f2.slider("Window (months)", 24, 120, 60, 12, key=f"{prefix}win")
-        step_years = f3.number_input("Step (years)", 1, 5, STEP_YEARS, 1, key=f"{prefix}stepy")
+        step_years = f3.number_input("Step (years)", 1, 5, STEP_YEARS, 1, key=f"{prefix}stride")
     elif est == EST_EXP:
-        step_years = f2.number_input("Step (years)", 1, 5, STEP_YEARS, 1, key=f"{prefix}stepy")
+        step_years = f2.number_input("Step (years)", 1, 5, STEP_YEARS, 1, key=f"{prefix}stride")
     else:
         drift_name = f2.select_slider(
             "Loading drift", list(KALMAN_DRIFT), value="medium", key=f"{prefix}drift",
@@ -181,8 +144,8 @@ def _fit(X, y, est, init_years, step_years, window_m, drift_name, prog):
     return walk_forward_style(X, y, init_years, int(step_years), window_m, prog)
 
 
-def _render_style_results(res, prefix: str, active: bool, market_leg=None):
-    """Metrics, the four tabs, and the Concierge handoff, for either flow."""
+def _render_style_results(res, prefix: str, market_leg=None):
+    """Metrics, the four tabs, and the Concierge handoff."""
     is_kalman = len(res.loadings_by_fold) == len(res.manager) and len(res.manager) > 0
     folds = res.folds
     m1, m2, m3, m4 = st.columns(4)
@@ -199,13 +162,10 @@ def _render_style_results(res, prefix: str, active: bool, market_leg=None):
                    "existed yet that had not seen it.")
     if market_leg and market_leg in res.loadings.index:
         _b = res.loadings[market_leg]
-        m4.metric("Beta to universe" + (" (−1)" if active else ""), f"{_b:.2f}",
-                  help=("Loading on the equal-weight universe leg. With an active-"
-                        "return target this reads as beta − 1, i.e. how far the "
-                        "beta-≈-1 assumption is off." if active else
-                        "Loading on the equal-weight universe leg. Kept separate "
-                        "so beta does not get smeared into the factor loadings; "
-                        "not sent to the Concierge."))
+        m4.metric("Beta to universe", f"{_b:.2f}",
+                  help="Loading on the equal-weight universe leg. Kept separate "
+                       "so beta does not get smeared into the factor loadings; "
+                       "not sent to the Concierge.")
     else:
         _alpha = folds["alpha_ann"].mean() if len(folds) else float("nan")
         m4.metric("Alpha (ann.)", f"{_alpha:+.1%}",
@@ -219,7 +179,7 @@ def _render_style_results(res, prefix: str, active: bool, market_leg=None):
 
     s_fold, s_load, s_rep, s_send = st.tabs(
         ["Fit over time", "Loadings", "Replication", "Send to Concierge"])
-    target = "active return" if active else "manager"
+    target = "manager"
 
     with s_fold:
         if len(folds):
@@ -339,7 +299,7 @@ def _render_style_results(res, prefix: str, active: bool, market_leg=None):
 # Returns — legs built from a stock × date panel
 # ═════════════════════════════════════════════════════════════════════════════
 if mode == MODE_RET:
-    y, active = _manager_intake("r", with_benchmark=False)
+    y = _manager_intake("r")
 
     with st.container(border=True, key="rstep2"):
         st.subheader(
@@ -441,7 +401,7 @@ if mode == MODE_RET:
     if st.session_state.get("style_key") != _key:
         st.info("Settings changed since the last fit — press **Fit** to refresh. "
                 "The results below are from the previous run.")
-    _render_style_results(res, "r", active, market_leg=MARKET_LEG)
+    _render_style_results(res, "r", market_leg=MARKET_LEG)
     st.stop()
 
 
@@ -519,12 +479,12 @@ with st.container(border=True, key="lstep2"):
     if not features:
         st.warning("Select at least one feature.")
         st.stop()
+    _yrs = parse_dates(raw[date_col]).dt.year
     st.caption(f"{len(raw):,} rows · {len(features)} features · held rate "
-               f"**{_t.mean():.2%}** · {pd.to_datetime(raw[date_col]).dt.year.min()}"
-               f"–{pd.to_datetime(raw[date_col]).dt.year.max()}")
+               f"**{_t.mean():.2%}** · {_yrs.min():.0f}–{_yrs.max():.0f}")
 
 work = raw.copy()
-work["date"] = pd.to_datetime(work[date_col], errors="coerce")
+work["date"] = parse_dates(work[date_col])
 work = work.dropna(subset=["date"])
 work["_target"] = pd.to_numeric(work[target_col], errors="coerce")
 _before = len(work)

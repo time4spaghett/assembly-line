@@ -25,8 +25,7 @@ from data_io import (REFERENCE_LABELS, ambiguous_date, load_base_panel,
                      load_benchmarks, load_short_panel, normalize_csv,
                      reference_series)
 from report import build_report as _build_report
-from ui import (BASELINE, BLUE, GRID, INK, INK_2, MUTED, RED, SURFACE,
-                ramp, style)
+from ui import BLUE, INK_2, RED, SURFACE, ramp, style
 from engine import (BENCH_COL, BENCH_REF, FWD_COLS, OP_PRODUCT, OP_SUM, OPS,
                     TRANSFORMS, Constraint, EdgeSpec, FeatureSpec, _as_number,
                     benchmark_options, consistency_checks, feature_columns,
@@ -41,14 +40,12 @@ HORIZON_LABELS = {"fwd_1m": "1 month", "fwd_3m": "3 months",
                   "fwd_6m": "6 months", "fwd_12m": "12 months"}
 
 # ── The example edge the app opens with ──────────────────────────────────────
-# A measured starting point, not a toy: at the default 1-month horizon this
-# scores IC +0.018 (Newey-West t +3.2), a +7.8% annualized top-minus-bottom
-# spread and a 0.81 long-short Sharpe; it holds at 12 months too (t +2.8) and
-# stays positive in every decade of the sample.
-# Economically it is cash-generative + profitable + clean-accounting + not
-# over-expanding — four categories, two of them entered with negative weight.
-# Communication Services is dropped because it is the one sector where the
-# signal genuinely fails (IC -0.003).
+# A measured starting point, not a toy: consumer names only, positive 6-month
+# momentum as a screen, then cash-generative + profitable + clean-accounting +
+# not over-expanding — two of the four legs entered with negative weight. At
+# the default 1-month horizon it scores IC +0.021 (Newey-West t +2.1), a +5.4%
+# annualized top-minus-bottom spread and a 0.41 long-short Sharpe. It is a
+# 1-month signal: at 12 months the IC holds (+0.023) but t falls to +1.2.
 EXAMPLE_ROWS = [
     {"feature": "fcf_yield", "transform": "rank", "weight": 1.0, "op": OP_SUM},   # value
     {"feature": "gpa",       "transform": "rank", "weight": 0.5, "op": OP_SUM},   # quality
@@ -85,7 +82,7 @@ def fig_ntile_bars(res, colors, hl, bench_label) -> go.Figure:
                   line_width=2, annotation_text=bench_label,
                   annotation_position="top left",
                   annotation_font=dict(color=INK_2, size=12))
-    fig.update_yaxes(tickformat=".0%", title=f"Mean {hl} fwd return, annualized")
+    fig.update_yaxes(tickformat=".0%", title=f"Geometric mean {hl} fwd return, annualized")
     return style(fig, 380)
 
 
@@ -215,8 +212,8 @@ def cached_run(engine_sig: str, panel_key: str, panel: pd.DataFrame,
 
 
 # ── Hidden developer mode ─────────────────────────────────────────────────────
-# No switch anywhere in the UI — append ?dev=1 to the URL. Left out of the
-# sidebar so it doesn't invite curious clicks; it's a debugging aid for
+# No switch anywhere in the UI — append ?dev=1 to the URL. Kept off the
+# page so it doesn't invite curious clicks; it's a debugging aid for
 # whoever runs this app, not a feature end users should discover.
 DEV_MODE = st.query_params.get("dev") == "1"
 
@@ -226,7 +223,7 @@ st.title("Edge Concierge")
 
 
 with st.container(border=True, key="step1"):
-    st.subheader('1 · Panel', help='The data every later step is measured on. The shipped panel is point-in-time S&P 500 membership with 24 raw features and forward returns; an upload replaces it wholesale.')
+    st.subheader('1 · Panel', help='The data every later step is measured on. Two shipped panels, both with forward returns — point-in-time S&P 500 with 24 value / quality / growth / momentum features, and the top 1,500 by market cap with the short-risk set. An upload replaces the panel wholesale.')
     source = st.radio("Panel", [BASE_PANEL_LABEL, SHORT_PANEL_LABEL, "Upload CSV"],
                       help="Monthly panels, 1998 → Dec 2025, post-2025 held out. "
                            "**Basic factors**: point-in-time S&P 500, 24 value / "
@@ -346,12 +343,17 @@ with st.container(border=True, key="step1"):
                        "including a benchmark return series, which you then pick "
                        "under **Benchmark** in Test setup.")
             if st.button("Load CSV", type="primary", width="stretch"):
-                st.session_state["csv_panel"] = normalize_csv(
+                _loaded = normalize_csv(
                     raw, id_col, date_col,
                     None if sector_col == "(none)" else sector_col,
                     None if industry_col == "(none)" else industry_col,
                     price_col=price_col, fwd_map=fwd_map,
                     join_base_returns=join_base)
+                if _loaded.empty:
+                    st.error(f"No rows survived — `{date_col}` didn't parse as "
+                             f"dates. Check the Date column mapping.")
+                else:
+                    st.session_state["csv_panel"] = _loaded
 
         if "csv_panel" in st.session_state:
             panel = st.session_state["csv_panel"]
@@ -556,7 +558,8 @@ if "sectors_w" not in st.session_state:          # open on the example universe
     st.session_state["sectors_w"] = _inc
     st.session_state["grain_w"] = "Sector" if _inc else "Everything"
 if "nl_pending" in st.session_state:
-    plan_sectors, plan_horizon = st.session_state.pop("nl_pending")
+    plan_sectors, plan_horizon, plan_neutral = st.session_state.pop("nl_pending")
+    st.session_state["neutral_w"] = bool(plan_neutral)
     # Only override a filter the description actually spoke to: an empty sector
     # list means "not mentioned", not "clear what you set".
     if plan_sectors:
@@ -624,14 +627,19 @@ with st.container(border=True, key="step2"):
                                          _nl_key,
                                          scales={f: tuple(_qs[f]) for f in features})
                         _s.update(label="Spec drafted", state="complete")
+                    if not plan.rows:
+                        raise ValueError("it came back with no features — try "
+                                         "naming them explicitly")
                     st.session_state["builder"] = pd.DataFrame(
-                        [r.model_dump() for r in plan.rows])
+                        [r.model_dump() for r in plan.rows],
+                        columns=["feature", "transform", "weight", "op"])
                     st.session_state.pop("builder_editor", None)
                     st.session_state["constraints"] = pd.DataFrame(
                         [c.model_dump() for c in plan.constraints],
                         columns=["left", "op", "right"])
                     st.session_state.pop("cons_editor", None)
-                    st.session_state["nl_pending"] = (plan.sectors, plan.horizon)
+                    st.session_state["nl_pending"] = (plan.sectors, plan.horizon,
+                                                      plan.sector_neutral)
                     st.session_state["nl_note"] = plan.rationale
                     st.rerun()
                 except Exception as e:
@@ -873,7 +881,11 @@ if cons:
 # series, so sampling dates at random leaks the future into the training set.
 IN_SAMPLE, OUT_SAMPLE, ALL_SAMPLE = "In-sample", "Holdout", "All"
 _last = fpanel["date"].max()
-_cut = _last - pd.DateOffset(years=int(holdout_yrs)) if holdout_yrs else None
+# exactly 12·N panel months of holdout: a calendar DateOffset cut lands
+# mid-month and hands the holdout one extra month (61 for a "5-year" split)
+_months = np.sort(fpanel["date"].unique())
+_cut = (pd.Timestamp(_months[-12 * int(holdout_yrs)])
+        if holdout_yrs and len(_months) > 12 * int(holdout_yrs) else None)
 
 if _cut is None:
     SAMPLES = {ALL_SAMPLE: fpanel}
@@ -897,7 +909,8 @@ sample = _c1.segmented_control(
 sample = sample or _opts[0]
 if _cut is not None:
     _c2.caption(
-        f"In-sample {fpanel['date'].min():%Y-%m} – {_cut:%Y-%m} "
+        f"In-sample {fpanel['date'].min():%Y-%m} – "
+        f"{SAMPLES[IN_SAMPLE]['date'].max():%Y-%m} "
         f"({SAMPLES[IN_SAMPLE]['date'].nunique()} months) · holdout "
         f"{_cut:%Y-%m} – {_last:%Y-%m} "
         f"({SAMPLES[OUT_SAMPLE]['date'].nunique()} months)")
@@ -1027,7 +1040,8 @@ _slug = run_slug(rows, horizon, _stamp)
 record = {
     "title": _title,
     "exported_at": _stamp.isoformat(timespec="seconds"),
-    "panel": BASE_PANEL_LABEL if panel_key == "base" else "custom upload",
+    "panel": {"base": BASE_PANEL_LABEL,
+              "short": SHORT_PANEL_LABEL}.get(panel_key, "custom upload"),
     "spec": {
         "formula": spec_formula(rows, sector_neutral, cons),
         "features": [{"feature": f, "transform": t, "weight": w, "op": o}
@@ -1227,7 +1241,7 @@ with tab_rank:
     st.write(f"Latest cross-section ({latest['date'].max():%Y-%m-%d}) — top ranked "
              f"by composite:")
     st.dataframe(latest.nlargest(25, "composite"), width="stretch", hide_index=True)
-    st.caption("Every name and date is in `scores.csv` inside the saved package.")
+    st.caption("Every name and date: **⋯ → Scores (CSV)**, next to Save run.")
 
 
 
@@ -1259,7 +1273,7 @@ month*:
 `2, 1`). **Negative flips the feature**, which is how you express "less of
 this": `accruals` and `asset_gr` are bad things, so they enter negatively.
 
-**Universe** — which names are eligible, in the sidebar. Sectors and industries
+**Universe** — which names are eligible, set in step 3. Sectors and industries
 are *include* lists (empty = everything), so you exclude a sector by leaving it
 out. Useful when a signal is meaningless somewhere — leverage and accruals do
 not mean the same thing for banks.
@@ -1310,14 +1324,15 @@ The builder table is always the source of truth. You can fill it in directly:
 | `accruals` | rank | −0.5 |
 | `asset_gr` | rank | −0.5 |
 
-…with **Communication Services** left out of the sidebar sector list. Which reads as:
+…with the universe cut to the two consumer sectors and `mom_6_1 > 0` as a condition in step 3. Which reads as:
 
 `edge = rank(fcf_yield) + 0.5·rank(gpa) − 0.5·rank(accruals) − 0.5·rank(asset_gr)`
 
-Or describe it in English in the box below and let it fill the table in for you:
+Or describe it in English in the step 2 box and let it fill the table in for you:
 
 > *“cash-generative, profitable companies with clean accounting that aren't
-> over-expanding, excluding communication services”*
+> over-expanding — consumer names only, and only ones with positive 6-month
+> momentum”*
 
 Either way you land on the same four rows — and you can edit them afterwards.
 Describing it in English is a starting point, not a separate mode.
@@ -1326,7 +1341,7 @@ Describing it in English is a starting point, not a separate mode.
 
 #### Bringing your own data
 
-Upload a CSV (sidebar → **Upload CSV**) and it replaces the panel wholesale —
+Upload a CSV (step 1 → **Upload CSV**) and it replaces the panel wholesale —
 **your data redefines everything downstream**:
 
 - **The universe** is whatever rows you supply. Sector and industry filters read
