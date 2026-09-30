@@ -28,7 +28,7 @@ from report import build_report as _build_report
 from ui import (BASELINE, BLUE, GRID, INK, INK_2, MUTED, RED, SURFACE,
                 ramp, style)
 from engine import (BENCH_COL, BENCH_REF, FWD_COLS, OP_PRODUCT, OP_SUM, OPS,
-                    TRANSFORMS, Constraint, EdgeSpec, FeatureSpec,
+                    TRANSFORMS, Constraint, EdgeSpec, FeatureSpec, _as_number,
                     benchmark_options, consistency_checks, feature_columns,
                     run_edge)
 
@@ -618,9 +618,11 @@ with st.container(border=True, key="step2"):
                     # bar — the API gives no progress to report, and a bar that
                     # invents one is a lie about how far along it is.
                     with st.status("Reading your description…", expanded=False) as _s:
+                        _qs = panel[features].quantile([0.1, 0.5, 0.9])
                         plan = plan_edge(desc, features,
                                          sorted(panel["sector"].dropna().unique()),
-                                         _nl_key)
+                                         _nl_key,
+                                         scales={f: tuple(_qs[f]) for f in features})
                         _s.update(label="Spec drafted", state="complete")
                     st.session_state["builder"] = pd.DataFrame(
                         [r.model_dump() for r in plan.rows])
@@ -682,7 +684,9 @@ with st.container(border=True, key="step3"):
             "Date range", _yr_min, _yr_max, (_yr_min, _yr_max), key="years_w")
 
     st.markdown("Conditions", help="On **raw** feature values: against a number "
-                "(`roa > 0`) or another feature (`roa > asset_gr`).")
+                "(`roa > 0`, `roa > 0.05`, `roa > 5%`) or another feature "
+                "(`roa > asset_gr`). Ratios and returns are stored as "
+                "**decimals**, so 5% is `0.05` or `5%` — never `5`.")
     cons_edited = st.columns([5, 1])[0].data_editor(
         st.session_state["constraints"],
         num_rows="dynamic", width="stretch", hide_index=True,
@@ -693,12 +697,39 @@ with st.container(border=True, key="step3"):
                                                    width="small"),
             "right": st.column_config.TextColumn(
                 "Than", width="medium",
-                help="A number (0, -0.1, 0.25) or another feature name."),
+                help="A number in the feature's own units — decimals for "
+                     "ratios and returns (0.05, or write 5%) — or another "
+                     "feature name."),
         },
         key="cons_editor",
     )
 
     cons = live_constraints()
+
+    # Units: every threshold is compared against the raw column, so show the
+    # scale of each feature in play and catch the classic slip — typing 5 for
+    # 5% against a decimal column, which silently screens out nearly everyone.
+    _scale_notes, _slips = [], []
+    for _l, _o, _r in cons:
+        if _l not in panel.columns or not pd.api.types.is_numeric_dtype(panel[_l]):
+            continue
+        _q = panel[_l].quantile([0.01, 0.05, 0.95, 0.99])
+        _scale_notes.append(f"`{_l}` {_q[0.05]:.3g} … {_q[0.95]:.3g}")
+        _thr = _as_number(_r)
+        if _thr is None:
+            continue
+        _lo, _hi = _q[0.01], _q[0.99]
+        _pad = max(_hi - _lo, 1e-9)
+        if not (_lo - _pad <= _thr <= _hi + _pad):
+            _hint = (f" Did you mean **{_thr / 100:g}** (i.e. `{_r}%`)?"
+                     if _lo <= _thr / 100 <= _hi else "")
+            _slips.append(f"`{_l} {_o} {_r}` — `{_l}` runs about "
+                          f"{_q[0.05]:.3g} … {_q[0.95]:.3g}, so this threshold is "
+                          f"far outside it.{_hint}")
+    if _scale_notes:
+        st.caption("Typical range (5th–95th pct): " + " · ".join(dict.fromkeys(_scale_notes)))
+    for _s in _slips:
+        st.warning(_s)
 
     # apply the screen
     mask = panel["date"].dt.year.between(*yr_range)

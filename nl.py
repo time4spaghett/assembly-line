@@ -48,8 +48,18 @@ def api_key() -> Optional[str]:
 
 
 def plan_edge(description: str, features: list[str], sectors: list[str],
-              key: str) -> EdgePlan:
+              key: str, scales: dict | None = None) -> EdgePlan:
     client = anthropic.Anthropic(api_key=key)
+    # constraint thresholds are compared against raw columns, so the model
+    # has to know each column's units — without them "ROA above 5%" came
+    # back as roa > 5 about as often as roa > 0.05
+    units = ""
+    if scales:
+        units = (" Units of each feature (10th / median / 90th percentile of the "
+                 "raw values) — every constraint threshold MUST be in these "
+                 "units: " + "; ".join(f"{f} {a:.3g}/{b:.3g}/{c:.3g}"
+                                       for f, (a, b, c) in scales.items())
+                 + ". Ratios and returns are decimals, so 5% is 0.05, never 5.")
     response = client.messages.parse(
         # Opus: the rationale it writes is the point of this box, not a
         # by-product, and the reasoning quality shows in it. The wait is made
@@ -61,7 +71,7 @@ def plan_edge(description: str, features: list[str], sectors: list[str],
         system=(
             "You translate a plain-English factor/edge idea into a spec for a "
             "quant backtester. Available features (raw values, higher = more of "
-            f"the named thing): {', '.join(features)}. "
+            f"the named thing): {', '.join(features)}.{units} "
             "Note: 'leverage', 'accruals' and 'asset_gr' are typically *bad* — "
             "use negative weights for them when the user wants safety/quality. "
             "'log_mcap' with negative weight = small-cap tilt. "

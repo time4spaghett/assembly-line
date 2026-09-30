@@ -95,8 +95,15 @@ def _transform_group(s: pd.Series, how: str) -> pd.Series:
 
 
 def _as_number(text: str):
+    """A threshold as typed: '0.05', '-0.1', '1,000', or '5%' (read as 0.05)."""
+    s = str(text).strip().replace(",", "")
+    scale = 1.0
+    if s.endswith("%"):
+        # features are stored as decimals, so a percent sign is a unit, not a
+        # typo — without this, 'roa > 5%' failed to parse and was dropped
+        s, scale = s[:-1].strip(), 0.01
     try:
-        return float(str(text).strip())
+        return float(s) * scale
     except (TypeError, ValueError):
         return None
 
