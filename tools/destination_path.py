@@ -924,8 +924,9 @@ else:
 # this pair of alphas, how does Chinook's two-pass mean-variance construction
 # do on this coverage — benchmark-relative, risk-penalised, capped, banded,
 # under a turnover budget. Run on demand: two cvxpy solves per month.
-from twopass import (TwoPassParams, RiskModel, VARIANTS, attach_risk_features,
-                     problem_statement, run_two_pass, summarize)
+from twopass import (TwoPassParams, RiskModel, attach_risk_features,
+                     problem_statement, run_two_pass, summarize,
+                     DEFAULT_VARIANTS as VARIANTS)
 
 with st.container(border=True, key="step6"):
     st.subheader("6 · Optimisation — set-up and launch", help="Chinook's two-pass "
@@ -1034,26 +1035,23 @@ if _tp and _tp[0] == _tp_sig:
     _bc = (1 + _res[VARIANTS[0]]["bench"]).cumprod()
     _f.add_trace(go.Scatter(x=_bc.index, y=_bc.values, name="Cap-weighted coverage", mode="lines",
                             line=dict(color=INK_2, width=2, dash="dash")))
-    for k, col in zip(VARIANTS, ("#9ec5f4", "#5598e7", BLUE)):
+    for k, col in zip(VARIANTS, ("#9ec5f4", BLUE)):
         _c = (1 + _res[k]["port"]).cumprod()
         _f.add_trace(go.Scatter(x=_c.index, y=_c.values, name=k, mode="lines",
                                 line=dict(color=col, width=3 if k == VARIANTS[-1] else 2)))
     _f.update_yaxes(type="log", title="Growth of $1 (log)")
     st.plotly_chart(style(_f, 360), width="stretch")
-    _full, _nopath, _direct = (_rows[VARIANTS[2]], _rows[VARIANTS[1]], _rows[VARIANTS[0]])
+    _full, _direct = (_rows[VARIANTS[-1]], _rows[VARIANTS[0]])
     st.caption(
-        f"Read the two gaps as in step 5. *Destination held directly → pass 2 without the path edge* "
-        f"(IR {_direct['information_ratio']:.2f} → {_nopath['information_ratio']:.2f}) is the turnover budget "
-        f"on its own; *without → with the path edge* ({_nopath['information_ratio']:.2f} → "
-        f"**{_full['information_ratio']:.2f}**) is what the path edge adds inside the optimizer at the same "
-        f"budget. Active share and gap say how much the risk penalty lets the book move: a small active "
-        f"share means the three books barely differ and the knobs above, not the edges, are what to look at. "
-        f"Gross of costs; turnover is one-way.")
-    _lam = _res[VARIANTS[2]].attrs.get("calibrated")
+        f"*Destination held directly* is pass 1 alone, traded all the way every month; the *two-pass* "
+        f"book reaches toward it under the turnover budget with the path edge steering (IR "
+        f"{_direct['information_ratio']:.2f} → **{_full['information_ratio']:.2f}**, one-way turnover "
+        f"{_direct['annual_turnover']:.0%} → {_full['annual_turnover']:.0%} a year). Gross of costs.")
+    _lam = _res[VARIANTS[-1]].attrs.get("calibrated")
     if _lam is not None:
-        _pt = _res[VARIANTS[2]]["pred_te"]
+        _pt = _res[VARIANTS[-1]]["pred_te"]
         st.caption(
-            f"Risk aversion calibrated on {_res[VARIANTS[2]].index.min():%Y-%m} to **λ = {_lam:.2f}** "
+            f"Risk aversion calibrated on {_res[VARIANTS[-1]].index.min():%Y-%m} to **λ = {_lam:.2f}** "
             f"(Chinook default 30) so pass 1 sat at {tp.te_target:.0%} predicted tracking error; the "
             f"{tp.te_target:.0%} cap then applies every month. The full two-pass book's predicted TE ran "
             f"{_pt.min():.1%}–{_pt.max():.1%} (mean {_pt.mean():.1%}): below the cap means λ, not the cap, "

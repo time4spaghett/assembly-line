@@ -393,7 +393,10 @@ def attach_risk_features(panel: pd.DataFrame, path=None) -> pd.DataFrame:
 
 # ── The tab's loop (new; replaces chinook/backtest.backtest for one coverage) ─
 
+# all books run_two_pass can produce; the tab shows DEFAULT_VARIANTS. The flat-path book
+# (short alpha zeroed) stays available for scripted runs: it is the ratio-0 point of an IC grid.
 VARIANTS = ("destination held directly", "pass 2 without the path edge", "two-pass (full)")
+DEFAULT_VARIANTS = ("destination held directly", "two-pass (full)")
 
 
 def calibrate_risk_aversion(bench, groups, long_rank, snap, p: TwoPassParams, te_target: float,
@@ -433,9 +436,10 @@ def centred_rank(s: pd.Series) -> pd.Series:
 
 def run_two_pass(coverage: pd.DataFrame, risk: RiskModel, dest_col: str, path_col: str,
                  p: TwoPassParams, init: str = "cap", date_col: str = "date",
-                 id_col: str = "ticker", progress=None) -> dict:
+                 id_col: str = "ticker", progress=None,
+                 variants: tuple = DEFAULT_VARIANTS) -> dict:
     """
-    Three books on the tab's coverage, every month the risk model covers:
+    Up to three books on the tab's coverage, every month the risk model covers:
       destination held directly   held = pass 1's destination each month (no budget)
       pass 2 without the path edge   the same two passes with the short alpha zeroed:
                                    the budget is spent purely by the risk-distance term
@@ -460,11 +464,11 @@ def run_two_pass(coverage: pd.DataFrame, risk: RiskModel, dest_col: str, path_co
             centred_rank(f0[dest_col].astype(float)), risk.at(dates[0]), p, p.te_target,
             held=bench0 if init == "cap" else pd.Series(1.0 / len(bench0), index=bench0.index))
         p = replace(p, risk_aversion=calibrated)
-    for vi, variant in enumerate(VARIANTS):
+    for vi, variant in enumerate(variants):
         held, plan_rank, rows, failed = None, None, [], 0
         for i, t in enumerate(dates):
             if progress:
-                progress((vi * len(dates) + i) / (3 * len(dates)), f"{variant}: {t:%Y-%m}")
+                progress((vi * len(dates) + i) / (len(variants) * len(dates)), f"{variant}: {t:%Y-%m}")
             f = frames[t]
             cap = np.exp(f["log_mcap"].astype(float)).dropna()
             f = f.loc[cap.index]
