@@ -52,6 +52,13 @@ def reference_series(ticker: str, dates: pd.Series) -> pd.Series:
     return pd.Series(vals.to_numpy(), index=idx, name=ticker)
 
 
+def load_sp500_edges_panel() -> pd.DataFrame:
+    """The S&P 500 panel plus combo_12m / combo_1m (the destination and path
+    edges) and beta_252d / resid_vol_252d (risk-model inputs), in one file —
+    built by panel_build_sp500_edges.py."""
+    return pd.read_parquet(Path(__file__).parent / "data" / "sp500_edges_panel.parquet")
+
+
 def load_panel_1500() -> pd.DataFrame:
     """Top-1500 by market cap, base factor set — built once by
     panel_build_1500.py from base-equity-edge's factor zoo (2026-09-06)."""

@@ -35,6 +35,7 @@ import streamlit as st
 
 from data_io import (AmbiguousDates, ambiguous_date, load_base_panel,
                      load_panel_1500, load_panel_smcap, load_short_panel,
+                     load_sp500_edges_panel,
                      normalize_csv)
 from ui import BLUE, INK_2, RED, SURFACE, ramp, style, universe_block
 from engine import (BENCH_CAP, BENCH_EW, FWD_COLS, TRANSFORMS, EdgeSpec,
@@ -43,6 +44,7 @@ from engine import (BENCH_CAP, BENCH_EW, FWD_COLS, TRANSFORMS, EdgeSpec,
                     newey_west_tstat, run_edge)
 
 BASE_PANEL_LABEL = "S&P 500 · 1998–2025 · basic factors"
+EDGES_LABEL = "S&P 500 · 1998–2025 · combo edges (combo_12m / combo_1m)"
 PANEL_1500_LABEL = "Top 1500 · 1998–2025 · base factors"
 # Streamlit renders $…$ as LaTeX, so the dollar signs are escaped.
 SMCAP_LABEL = "Mid/small cap · \\$2B–\\$20B today, as a percentile band · 1998–2025"
@@ -112,6 +114,9 @@ PATH_ROWS_SHORT = [
 # effects (low-vol anomaly; asset-growth factor), which is why they are in
 # and roe_mom / value-heavy / quality-heavy variants, which were not better,
 # are not.
+# S&P 500 combo-edges panel: the two edges are single columns, used as-is.
+DEST_ROWS_EDGES = [{"feature": "combo_12m", "transform": "rank", "weight": 1.0}]
+PATH_ROWS_EDGES = [{"feature": "combo_1m", "transform": "rank", "weight": 1.0}]
 DEST_ROWS_1500 = [
     {"feature": "fcf_yield", "transform": "rank", "weight": 1.0},
     {"feature": "roic",      "transform": "rank", "weight": 1.0},
@@ -190,6 +195,11 @@ def fig_ic(res, hl) -> go.Figure:
 @st.cache_data(show_spinner="Loading base panel…")
 def base_panel() -> pd.DataFrame:
     return load_base_panel()
+
+
+@st.cache_data(show_spinner="Loading S&P 500 combo-edges panel…")
+def sp500_edges_panel() -> pd.DataFrame:
+    return load_sp500_edges_panel()
 
 
 @st.cache_data(show_spinner="Loading top-1500 panel…")
@@ -274,13 +284,14 @@ with st.container(border=True, key="step1"):
     # Only the panels actually on disk are offered: the deployed app ships the
     # S&P panel alone, the larger ones stay local.
     _data_dir = pathlib.Path(_engine_mod.__file__).parent / "data"
-    _options = [lbl for lbl, fn in ((PANEL_1500_LABEL, "base_panel_1500.parquet"),
+    _options = [lbl for lbl, fn in ((EDGES_LABEL, "sp500_edges_panel.parquet"),
+                                    (PANEL_1500_LABEL, "base_panel_1500.parquet"),
                                     (SMCAP_LABEL, "base_panel_smcap.parquet"),
                                     (BASE_PANEL_LABEL, "base_panel.parquet"),
                                     (SHORT_PANEL_LABEL, "short_panel.parquet"))
                 if (_data_dir / fn).exists()] + ["Upload CSV"]
     source = st.radio("Panel", _options, key="dp_source",
-                      help="Monthly panels, 1998 → Dec 2025, point-in-time. **Top "
+                      help="Monthly panels, 1998 → Dec 2025, point-in-time. **S&P 500 · combo edges** (the default): the S&P 500 panel plus the two edges as columns — `combo_12m` (12-month score) and `combo_1m` (1-month score, from 2009-08) — and the daily-return risk inputs the optimizer uses. **Top "
                            "1500 · base factors**: largest 1,500 US stocks by market "
                            "cap, 34 value / quality / growth / momentum / "
                            "fundamental-momentum / risk features (the default — "
@@ -292,7 +303,9 @@ with st.container(border=True, key="step1"):
                            "blow-up-screen set, oriented higher = riskier. A CSV "
                            "loaded here or in the Concierge is shared.")
     panel, panel_key = None, "base"
-    if source == PANEL_1500_LABEL:
+    if source == EDGES_LABEL:
+        panel, panel_key = sp500_edges_panel(), "sp500_edges"
+    elif source == PANEL_1500_LABEL:
         panel, panel_key = panel_1500(), "top1500"
     elif source == SMCAP_LABEL:
         panel, panel_key = panel_smcap(), "smcap"
@@ -557,6 +570,7 @@ with st.container(border=True, key="step3"):
                  "path at the short one. The matrix below tests exactly that, in "
                  "both directions.")
     _dest_default, _path_default = {
+        "sp500_edges": (DEST_ROWS_EDGES, PATH_ROWS_EDGES),
         "top1500": (DEST_ROWS_1500, PATH_ROWS_1500),
         "smcap": (DEST_ROWS_1500, PATH_ROWS_1500),   # same edges; stronger in the band
         "short": (DEST_ROWS_SHORT, PATH_ROWS_SHORT),
