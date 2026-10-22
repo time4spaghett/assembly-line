@@ -161,6 +161,16 @@ def check_twopass() -> list:
         fails.append("direct-destination book not on its destination")
     if not (full["active_share"].between(0, 1).all()):
         fails.append("active share outside [0, 1]")
+    # tracking-error target: risk aversion is calibrated and pass 1 stays inside the cap
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res_te = run_two_pass(cov, risk, "dest", "path",
+                              TwoPassParams(turnover_budget=0.04, dest_every=3, te_target=0.04))
+    direct = res_te["destination held directly"]
+    if direct.attrs.get("calibrated") is None:
+        fails.append("te_target set but risk aversion was not calibrated")
+    if (direct["pred_te"] > 0.04 + 1e-3).any():
+        fails.append(f"pass 1 above the 4% tracking-error cap (max {direct['pred_te'].max():.4f})")
     return fails
 
 

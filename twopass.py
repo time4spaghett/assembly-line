@@ -396,6 +396,36 @@ def attach_risk_features(panel: pd.DataFrame, path=None) -> pd.DataFrame:
 VARIANTS = ("destination held directly", "pass 2 without the path edge", "two-pass (full)")
 
 
+def calibrate_risk_aversion(bench, groups, long_rank, snap, p: TwoPassParams, te_target: float,
+                            held=None, lo: float = 0.1, hi: float = 300.0, iters: int = 14) -> float:
+    """
+    Bisect risk_aversion (log scale) until pass 1's destination has predicted
+    annual tracking error `te_target` against `bench` — Chinook's calibrate_c
+    pattern (bisect c to a target active share) applied to the mean-variance
+    pass with tracking error as the target. The hard cap p.te_target is lifted
+    during the search so the penalty, not the cap, sets the distance.
+    Returns the calibrated risk_aversion (hi if the target is unreachable).
+    """
+    from dataclasses import replace
+    q = replace(p, te_target=None)
+
+    def te(ra: float) -> float:
+        d = mvo_destination(bench, groups, long_rank, snap, replace(q, risk_aversion=ra), held=held)
+        if d is None:
+            return float("nan")
+        return snap.vol(d - bench.reindex(d.index, fill_value=0.0))
+
+    lo_, hi_ = np.log(lo), np.log(hi)
+    for _ in range(iters):
+        mid = 0.5 * (lo_ + hi_)
+        v = te(float(np.exp(mid)))
+        if np.isnan(v) or v > te_target:   # too much risk: raise the penalty
+            lo_ = mid
+        else:
+            hi_ = mid
+    return float(np.exp(0.5 * (lo_ + hi_)))
+
+
 def centred_rank(s: pd.Series) -> pd.Series:
     """Chinook's alpha for the optimizer: rank of ranks across the universe, centred (panel.py:157)."""
     return (s.rank(pct=True) - 0.5).fillna(0.0)
@@ -416,6 +446,20 @@ def run_two_pass(coverage: pd.DataFrame, risk: RiskModel, dest_col: str, path_co
     frames = {d: f.set_index(id_col) for d, f in coverage.groupby(date_col)}
     dates = [d for d in sorted(frames) if d >= risk.first_date()]
     out = {}
+    calibrated = None
+    if p.te_target:
+        # risk aversion calibrated once, on the first month, so pass 1 sits at the
+        # target tracking error; p.te_target then caps every later month
+        from dataclasses import replace
+        f0 = frames[dates[0]]
+        cap0 = np.exp(f0["log_mcap"].astype(float)).dropna()
+        f0 = f0.loc[cap0.index]
+        bench0 = cap0 / cap0.sum()
+        calibrated = calibrate_risk_aversion(
+            bench0, merge_small_groups(f0["sector"].fillna("Unknown")),
+            centred_rank(f0[dest_col].astype(float)), risk.at(dates[0]), p, p.te_target,
+            held=bench0 if init == "cap" else pd.Series(1.0 / len(bench0), index=bench0.index))
+        p = replace(p, risk_aversion=calibrated)
     for vi, variant in enumerate(VARIANTS):
         held, plan_rank, rows, failed = None, None, [], 0
         for i, t in enumerate(dates):
@@ -452,12 +496,16 @@ def run_two_pass(coverage: pd.DataFrame, risk: RiskModel, dest_col: str, path_co
                 new = held.reindex(trades.index, fill_value=0.0) + trades
             r = f["fwd_1m"].astype(float).reindex(new.index).fillna(0.0)
             bench_r = f["fwd_1m"].astype(float).reindex(bench.index).fillna(0.0)
+            active = new.reindex(snap.X.index, fill_value=0.0) - bench.reindex(snap.X.index, fill_value=0.0)
             rows.append({"date": t, "port": float((new * r).sum()), "bench": float((bench * bench_r).sum()),
                          "turnover": one_way_turnover(trades), "active_share": active_share(new, bench),
-                         "gap": active_share(new, dest), "names": int((new > 1e-6).sum())})
+                         "gap": active_share(new, dest), "names": int((new > 1e-6).sum()),
+                         "pred_te": snap.vol(active)})
             held = drift(new[new > 1e-12], r)
         df = pd.DataFrame(rows).set_index("date")
         df.attrs["failed"] = failed
+        df.attrs["risk_aversion"] = p.risk_aversion
+        df.attrs["calibrated"] = calibrated
         out[variant] = df
     return out
 
@@ -477,24 +525,28 @@ def summarize(res: pd.DataFrame, periods_per_year: int = 12) -> dict:
             "annual_turnover": float(res["turnover"].mean() * periods_per_year),
             "avg_active_share": float(res["active_share"].mean()),
             "avg_gap": float(res["gap"].mean()), "months": int(len(res)),
+            "avg_pred_te": float(res["pred_te"].mean()) if "pred_te" in res else np.nan,
             "solver_failures": int(res.attrs.get("failed", 0))}
 
 
 def problem_statement(p: TwoPassParams, budget_two_way: float, rerank: int) -> str:
     """The problem as it will be solved, with the numbers filled in."""
+    ra = "λ" if p.te_target else f"{p.risk_aversion:g}"
+    te_line = (f"\n               predicted tracking error ≤ {p.te_target:.0%} a year (hard cap)"
+               if p.te_target else "")
     return f"""
 **Pass 1 — destination** (every month, from the held book; long alpha refreshed every {rerank} month(s))
 
-    maximize   α_dest'(w − bench) − ({p.risk_aversion:g}/2)·(w − bench)' V (w − bench) − {p.hold_hurdle:g}·|w − held|₁
+    maximize   α_dest'(w − bench) − ({ra}/2)·(w − bench)' V (w − bench) − {p.hold_hurdle:g}·|w − held|₁
     s.t.       w ≥ 0,  Σw = 1,  w_i ≤ max({p.cap_abs:g}, {p.cap_mult:g}·bench_i)
-               |sector active weight| ≤ max({p.band_abs:g}, {p.band_rel:g}·bench_sector), capped at {p.band_cap:g}·bench_sector
+               |sector active weight| ≤ max({p.band_abs:g}, {p.band_rel:g}·bench_sector), capped at {p.band_cap:g}·bench_sector{te_line}
 
 **Pass 2 — trading step** (toward that destination, path alpha steering)
 
-    maximize   α_path'(w − held) − ({p.risk_aversion:g}/2)·(w − dest)' V (w − dest)
+    maximize   α_path'(w − held) − ({ra}/2)·(w − dest)' V (w − dest)
     s.t.       pass 1's constraints,  one-way turnover ≤ {p.turnover_budget:.1%} (the tab's {budget_two_way:.0%} buys + sells),
                {"held_i ≤ w_i ≤ dest_i or dest_i ≤ w_i ≤ held_i (never past the destination)" if p.toward_destination else "no direction box"}
 
-**Alpha**: each edge's rank across the coverage, centred, × IC × specific vol — IC_dest {p.ic_long:g}, IC_path {p.ic_short:g} per month.
+{"**λ** (risk aversion): calibrated on the first month by bisection so pass 1 sits at the " + f"{p.te_target:.0%}" + " tracking-error target; the same λ is used in both passes and every month after." + chr(10) + chr(10) if p.te_target else ""}**Alpha**: each edge's rank across the coverage, centred, × IC × specific vol — IC_dest {p.ic_long:g}, IC_path {p.ic_short:g} per month.
 **V**: factor risk model (sectors + styles, Ledoit-Wolf EWMA factor covariance, blended specific risk, volatility-regime adjusted), fit on the whole selected panel, monthly units.
 """

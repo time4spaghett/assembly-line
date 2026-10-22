@@ -934,9 +934,15 @@ with st.container(border=True, key="step6"):
                  "book; pass 2 spends the turnover budget toward it with the path edge "
                  "steering. The risk model is fit on the whole selected panel; the "
                  "solve runs on this coverage.")
-    o1, o2, o3, o4, o5 = st.columns(5)
+    o0, o1, o2, o3, o4, o5 = st.columns(6)
+    tp_te = o0.number_input("Max tracking error", 0.0, 0.20, 0.04, 0.005, key="tp_te", format="%.3f",
+                            help="Annual, predicted, vs the cap-weighted coverage. Set: risk aversion is "
+                                 "calibrated on the first month so pass 1 sits at this tracking error, and "
+                                 "it is a hard cap every month after. 0: risk aversion as entered, no cap.")
     tp_ra = o1.number_input("Risk aversion", 1.0, 200.0, 30.0, 5.0, key="tp_ra",
-                            help="Penalty on predicted active variance, monthly units (Chinook default 30).")
+                            disabled=tp_te > 0,
+                            help="Penalty on predicted active variance, monthly units (Chinook default 30). "
+                                 "Only used when max tracking error is 0.")
     tp_hurdle = o2.number_input("Hold hurdle", 0.0, 0.02, 0.001, 0.0005, key="tp_hurdle", format="%.4f",
                                 help="Monthly return a move away from the held book must clear (default 0.001).")
     tp_icl = o3.number_input("IC, destination", 0.0, 0.1, 0.02, 0.005, key="tp_icl", format="%.3f",
@@ -947,7 +953,8 @@ with st.container(border=True, key="step6"):
                           help="Pass 2 never reverses a trade or overshoots (default on).")
     tp = TwoPassParams(risk_aversion=float(tp_ra), hold_hurdle=float(tp_hurdle),
                        ic_long=float(tp_icl), ic_short=float(tp_ics), toward_destination=bool(tp_toward),
-                       turnover_budget=float(budget) / 2.0, dest_every=int(rerank))
+                       turnover_budget=float(budget) / 2.0, dest_every=int(rerank),
+                       te_target=float(tp_te) if tp_te > 0 else None)
     st.markdown(problem_statement(tp, float(budget), int(rerank)))
     # the whole (unscreened) panel over the sample's dates, not the coverage: the risk
     # model needs 100+ priced names a month and the cross-section's factor structure
@@ -1015,11 +1022,13 @@ if _tp and _tp[0] == _tp_sig:
         "ann_return": "Ann. return", "ann_vol": "Ann. vol", "sharpe": "Sharpe", "max_drawdown": "Max DD",
         "active_return": "Active vs cap-wtd", "tracking_error": "TE", "information_ratio": "IR",
         "annual_turnover": "One-way turnover / yr", "avg_active_share": "Active share",
-        "avg_gap": "Gap to dest.", "months": "Months", "solver_failures": "Solver fails"})
+        "avg_gap": "Gap to dest.", "avg_pred_te": "Predicted TE", "months": "Months",
+        "solver_failures": "Solver fails"}).apply(pd.to_numeric, errors="coerce")
     st.dataframe(_tbl.style.format({"Ann. return": "{:+.1%}", "Ann. vol": "{:.1%}", "Sharpe": "{:.2f}",
                                     "Max DD": "{:.0%}", "Active vs cap-wtd": "{:+.1%}", "TE": "{:.1%}",
                                     "IR": "{:.2f}", "One-way turnover / yr": "{:.0%}", "Active share": "{:.0%}",
-                                    "Gap to dest.": "{:.0%}", "Months": "{:.0f}", "Solver fails": "{:.0f}"},
+                                    "Gap to dest.": "{:.0%}", "Predicted TE": "{:.1%}", "Months": "{:.0f}",
+                                    "Solver fails": "{:.0f}"},
                                    na_rep="—"), width="stretch")
     _f = go.Figure()
     _bc = (1 + _res[VARIANTS[0]]["bench"]).cumprod()
@@ -1040,6 +1049,15 @@ if _tp and _tp[0] == _tp_sig:
         f"budget. Active share and gap say how much the risk penalty lets the book move: a small active "
         f"share means the three books barely differ and the knobs above, not the edges, are what to look at. "
         f"Gross of costs; turnover is one-way.")
+    _lam = _res[VARIANTS[2]].attrs.get("calibrated")
+    if _lam is not None:
+        _pt = _res[VARIANTS[2]]["pred_te"]
+        st.caption(
+            f"Risk aversion calibrated on {_res[VARIANTS[2]].index.min():%Y-%m} to **λ = {_lam:.2f}** "
+            f"(Chinook default 30) so pass 1 sat at {tp.te_target:.0%} predicted tracking error; the "
+            f"{tp.te_target:.0%} cap then applies every month. The full two-pass book's predicted TE ran "
+            f"{_pt.min():.1%}–{_pt.max():.1%} (mean {_pt.mean():.1%}): below the cap means λ, not the cap, "
+            f"is what held it back that month.")
 
 # ── Latest cross-section + handoff ───────────────────────────────────────────
 st.markdown("#### Latest cross-section")
