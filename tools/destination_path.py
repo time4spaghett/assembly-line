@@ -960,9 +960,9 @@ with st.container(border=True, key="step6"):
                                  "Only used when max tracking error is 0.")
     tp_hurdle = o2.number_input("Hold hurdle", 0.0, 0.02, 0.001, 0.0005, key="tp_hurdle", format="%.4f",
                                 help="Monthly return a move away from the held book must clear (default 0.001).")
-    tp_icl = o3.number_input("IC, destination", 0.0, 0.1, 0.02, 0.005, key="tp_icl", format="%.3f",
+    tp_icl = o3.number_input("IC, destination", 0.0, 0.1, 0.02, 0.001, key="tp_icl", format="%.4f",
                              help="Puts the destination rank in monthly return units (default 0.02).")
-    tp_ics = o4.number_input("IC, path", 0.0, 0.1, 0.015, 0.005, key="tp_ics", format="%.3f",
+    tp_ics = o4.number_input("IC, path", 0.0, 0.1, 0.015, 0.001, key="tp_ics", format="%.4f",
                              help="Puts the path rank in monthly return units (default 0.015).")
     tp_toward = o5.toggle("Only toward destination", value=True, key="tp_toward",
                           help="Pass 2 never reverses a trade or overshoots (default on).")
