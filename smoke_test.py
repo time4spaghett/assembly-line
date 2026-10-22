@@ -31,7 +31,7 @@ EXPECT = {
         "metrics": 5},
     "tools/destination_path.py": {
         "subheaders": ["1 · Panel", "2 · Coverage", "3 · The two edges", "4 · Test",
-                       "5 · Unite — pace the trades"],
+                       "5 · Unite — pace the trades", "6 · Optimisation — set-up and launch"],
         "metrics": 11},   # 4 per edge + 3 agreement
     "tools/hold_propensity.py": {   # stops at the inference button without a key
         "subheaders": ["1 · Holdings and factors", "2 · Interpret and compile"],
@@ -46,7 +46,7 @@ EXPECT = {
         "metrics": 0},
 }
 MODULES = ["engine", "data_io", "report", "learned", "nl", "ui", "neural",
-           "concepts", "autoencoder", "pace", "hold_prop"]
+           "concepts", "autoencoder", "pace", "hold_prop", "twopass"]
 
 
 def check_imports() -> list:
@@ -124,6 +124,43 @@ def check_pace() -> list:
     if len(dt_) == 2 and not (dt_["mean_diff"] > 0).all():
         fails.append(f"deferral did not pay with a perfect path signal: "
                      f"{dt_[['side', 'mean_diff']].to_dict('records')}")
+    return fails
+
+
+def check_twopass() -> list:
+    """Chinook's two-pass on a short window of the S&P panel: both solves must
+    succeed, weights stay a simplex inside the caps, pass 2 must respect the
+    one-way budget, and the direct-destination book must sit on its destination."""
+    import warnings
+    import numpy as np
+    import pandas as pd
+    from engine import EdgeSpec, FeatureSpec, build_composite
+    from twopass import RiskModel, TwoPassParams, run_two_pass, attach_risk_features
+    fails = []
+    p = pd.read_parquet(ROOT / "data" / "base_panel.parquet")
+    p = p[(p.date >= "2016-01-01") & (p.date <= "2018-12-31")].copy()
+    p = attach_risk_features(p)
+    p["dest"] = build_composite(p, EdgeSpec([FeatureSpec("fcf_yield", "rank", 1.0),
+                                             FeatureSpec("gpa", "rank", 0.5)]))
+    p["path"] = build_composite(p, EdgeSpec([FeatureSpec("ret_1m", "rank", -1.0)]))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        risk = RiskModel(p)
+        cov = p[p.sector.isin(["Healthcare", "Technology"])]
+        tp = TwoPassParams(turnover_budget=0.04, dest_every=3)
+        res = run_two_pass(cov, risk, "dest", "path", tp)
+    for k, v in res.items():
+        if v.attrs.get("failed", 0):
+            fails.append(f"two-pass '{k}': {v.attrs['failed']} solver failures")
+        if v["port"].isna().any():
+            fails.append(f"two-pass '{k}': NaN returns")
+    full = res["two-pass (full)"]
+    if (full["turnover"] > tp.turnover_budget + 1e-6).any():
+        fails.append(f"pass 2 exceeded the one-way budget ({full['turnover'].max():.4f} > {tp.turnover_budget})")
+    if (res["destination held directly"]["gap"] > 1e-6).any():
+        fails.append("direct-destination book not on its destination")
+    if not (full["active_share"].between(0, 1).all()):
+        fails.append("active share outside [0, 1]")
     return fails
 
 
@@ -328,7 +365,8 @@ def check_pages() -> list:
 def main() -> int:
     all_fails = []
     for name, fn in (("imports", check_imports), ("engine", check_engine),
-                     ("pace", check_pace), ("hold_prop", check_hold_prop),
+                     ("pace", check_pace), ("twopass", check_twopass),
+                     ("hold_prop", check_hold_prop),
                      ("neural", check_neural),
                      ("autoencoder", check_autoencoder), ("pages", check_pages)):
         print(f"  {name}…")

@@ -15,8 +15,9 @@ universe screen, same scoring engine, but two builder tables, each scored on
 its own horizon, plus a cross-horizon matrix so a factor set can be judged on
 whether it carries information where it is meant to — and not where it isn't.
 
-Sector-analyst framing by default: one sector, terciles, and the IC's
-minimum cross-section lowered so a 20-name coverage list still scores.
+Whole panel by default, terciles; a sector cut (the analyst's coverage) is one
+click in step 2, and the IC's minimum cross-section is a knob so a 20-name list
+still scores.
 
 Run:  streamlit run main.py  (this is a page, not the entry point)
 """
@@ -123,7 +124,7 @@ PATH_ROWS_1500 = [
     {"feature": "vol_1m",     "transform": "rank", "weight": -0.5},   # avoid high vol
     {"feature": "max_ret_1m", "transform": "rank", "weight": -0.5},   # avoid lottery
 ]
-DEFAULT_SECTORS = ["Healthcare"]   # ~160 names a month on the top 1500, ~55 on the 500
+DEFAULT_SECTORS = []   # whole panel by default; a sector cut is one click in step 2
 DEST_HORIZON, PATH_HORIZON = "fwd_12m", "fwd_1m"
 
 
@@ -421,7 +422,7 @@ features = feature_columns(panel)
 
 with st.container(border=True, key="step2"):
     st.subheader("2 · Coverage", help="The names both edges rank — the same universe "
-                 "for both, by construction. Default is one sector, the analyst's "
+                 "for both, by construction. Whole panel by default; cut to a sector for an analyst's "
                  "coverage list. Conditions are applied before ranking.")
     uni = universe_block(panel, "dp", features, default_sectors=DEFAULT_SECTORS)
 fpanel = uni["panel"]
@@ -916,6 +917,129 @@ else:
                 "executed — positive means the names it kept holding did keep rising. This "
                 "is the path edge scored only on the trades the destination actually wanted, "
                 "which is the only place it matters.")
+
+# ── 6 · Optimisation: Chinook's two-pass, on these two edges ─────────────────
+# Steps 4–5 ask whether the edges rank stocks (sorted equal-weight ntiles) and
+# how to pace between them. This asks the feasible-portfolio question: given
+# this pair of alphas, how does Chinook's two-pass mean-variance construction
+# do on this coverage — benchmark-relative, risk-penalised, capped, banded,
+# under a turnover budget. Run on demand: two cvxpy solves per month.
+from twopass import (TwoPassParams, RiskModel, VARIANTS, attach_risk_features,
+                     problem_statement, run_two_pass, summarize)
+
+with st.container(border=True, key="step6"):
+    st.subheader("6 · Optimisation — set-up and launch", help="Chinook's two-pass "
+                 "optimizer (tag phaseE-two-pass-optimizer) on the destination and path "
+                 "edges above. Pass 1 solves a risk-penalised destination from the held "
+                 "book; pass 2 spends the turnover budget toward it with the path edge "
+                 "steering. The risk model is fit on the whole selected panel; the "
+                 "solve runs on this coverage.")
+    o1, o2, o3, o4, o5 = st.columns(5)
+    tp_ra = o1.number_input("Risk aversion", 1.0, 200.0, 30.0, 5.0, key="tp_ra",
+                            help="Penalty on predicted active variance, monthly units (Chinook default 30).")
+    tp_hurdle = o2.number_input("Hold hurdle", 0.0, 0.02, 0.001, 0.0005, key="tp_hurdle", format="%.4f",
+                                help="Monthly return a move away from the held book must clear (default 0.001).")
+    tp_icl = o3.number_input("IC, destination", 0.0, 0.1, 0.02, 0.005, key="tp_icl", format="%.3f",
+                             help="Puts the destination rank in monthly return units (default 0.02).")
+    tp_ics = o4.number_input("IC, path", 0.0, 0.1, 0.015, 0.005, key="tp_ics", format="%.3f",
+                             help="Puts the path rank in monthly return units (default 0.015).")
+    tp_toward = o5.toggle("Only toward destination", value=True, key="tp_toward",
+                          help="Pass 2 never reverses a trade or overshoots (default on).")
+    tp = TwoPassParams(risk_aversion=float(tp_ra), hold_hurdle=float(tp_hurdle),
+                       ic_long=float(tp_icl), ic_short=float(tp_ics), toward_destination=bool(tp_toward),
+                       turnover_budget=float(budget) / 2.0, dest_every=int(rerank))
+    st.markdown(problem_statement(tp, float(budget), int(rerank)))
+    # the whole (unscreened) panel over the sample's dates, not the coverage: the risk
+    # model needs 100+ priced names a month and the cross-section's factor structure
+    _d0, _d1 = SAMPLES[sample]["date"].min(), SAMPLES[sample]["date"].max()
+    _panel_all = panel[panel["date"].between(_d0, _d1)]
+    _rf_path = pathlib.Path(_engine_mod.__file__).parent / "data" / "risk_features_1500.parquet"
+    st.caption(f"Risk model fit on **{_panel_all['date'].nunique():,} months** of the whole "
+               f"{sample.lower()} panel ({_panel_all['ticker'].nunique():,} names); the first 25 months "
+               f"are warm-up. Daily-return risk inputs (`beta_252d`, `resid_vol_252d`): "
+               f"{'present' if _rf_path.exists() else 'absent — style legs from the panel only'}. "
+               f"Starting book: {init.lower()}. Books start on the same date as each other, after the warm-up.")
+    launch = st.button("Launch optimisation", type="primary", key="tp_launch",
+                       help="Two cvxpy solves per month per variant; a sector coverage takes "
+                            "seconds to a minute, the whole panel several minutes.")
+
+
+@st.cache_data(show_spinner="Fitting the risk model…")
+def cached_risk(sig: str, sample: str, panel_all: pd.DataFrame):
+    return RiskModel(attach_risk_features(panel_all))
+
+
+_tp_sig = f"{ENGINE_SIG}|{panel_key}|{sample}|{dest['rows']}|{path['rows']}|{dest['neutral']}|{path['neutral']}|{budget}|{rerank}|{init}|{tp}"
+if launch:
+    try:
+        _risk = cached_risk(f"{ENGINE_SIG}|{panel_key}", sample, _panel_all)
+        _cov = sub[["date", "ticker", "sector", "log_mcap", "fwd_1m"]].assign(dest=cd_.to_numpy(), path=cp_.to_numpy())
+        _bar = st.progress(0.0, "Solving…")
+        _res = run_two_pass(_cov, _risk, "dest", "path", tp, "cap" if init.startswith("Cap") else "ew",
+                            progress=lambda f, m: _bar.progress(min(f, 1.0), m))
+        _bar.progress(1.0, "Done")
+        st.session_state["tp_result"] = (_tp_sig, _res)
+    except Exception as e:
+        st.error(f"Optimisation failed: {e}")
+
+_tp = st.session_state.get("tp_result")
+if _tp and _tp[0] == _tp_sig:
+    _res = _tp[1]
+    _first = min(v.index.min() for v in _res.values())
+    _rows = {k: summarize(v) for k, v in _res.items()}
+    _bm = _res[VARIANTS[0]]["bench"]
+    _rows["Cap-weighted coverage (benchmark)"] = {
+        "ann_return": (1 + _bm.mean()) ** 12 - 1, "ann_vol": _bm.std() * np.sqrt(12),
+        "sharpe": ((1 + _bm.mean()) ** 12 - 1) / (_bm.std() * np.sqrt(12)),
+        "max_drawdown": float(((1 + _bm).cumprod() / (1 + _bm).cumprod().cummax() - 1).min()),
+        "active_return": 0.0, "tracking_error": 0.0, "information_ratio": np.nan,
+        "annual_turnover": np.nan, "avg_active_share": 0.0, "avg_gap": np.nan,
+        "months": len(_bm), "solver_failures": np.nan}
+    # the tab's own paced books over the same months, for reference
+    for m_, lbl in (("modulated", LABELS["modulated"]), ("wholesale", LABELS["wholesale"])):
+        pr = paced[m_]["cum"].pct_change().dropna()
+        pr = pr[pr.index >= _first]
+        if len(pr):
+            # the optimizer's own benchmark (cap-weighted coverage), not step 5's equal-weight one
+            b_ = _res[VARIANTS[0]]["bench"].reindex(pr.index); act = pr - b_
+            cum_ = (1 + pr).cumprod()
+            _rows[f"(step 5) {lbl}"] = {
+                "ann_return": (1 + pr.mean()) ** 12 - 1, "ann_vol": pr.std() * np.sqrt(12),
+                "sharpe": ((1 + pr.mean()) ** 12 - 1) / (pr.std() * np.sqrt(12)),
+                "max_drawdown": float((cum_ / cum_.cummax() - 1).min()),
+                "active_return": act.mean() * 12, "tracking_error": act.std() * np.sqrt(12),
+                "information_ratio": act.mean() * 12 / (act.std() * np.sqrt(12)) if act.std() > 0 else np.nan,
+                "annual_turnover": np.nan, "avg_active_share": np.nan, "avg_gap": np.nan,
+                "months": len(pr), "solver_failures": np.nan}
+    _tbl = pd.DataFrame(_rows).T.rename(columns={
+        "ann_return": "Ann. return", "ann_vol": "Ann. vol", "sharpe": "Sharpe", "max_drawdown": "Max DD",
+        "active_return": "Active vs cap-wtd", "tracking_error": "TE", "information_ratio": "IR",
+        "annual_turnover": "One-way turnover / yr", "avg_active_share": "Active share",
+        "avg_gap": "Gap to dest.", "months": "Months", "solver_failures": "Solver fails"})
+    st.dataframe(_tbl.style.format({"Ann. return": "{:+.1%}", "Ann. vol": "{:.1%}", "Sharpe": "{:.2f}",
+                                    "Max DD": "{:.0%}", "Active vs cap-wtd": "{:+.1%}", "TE": "{:.1%}",
+                                    "IR": "{:.2f}", "One-way turnover / yr": "{:.0%}", "Active share": "{:.0%}",
+                                    "Gap to dest.": "{:.0%}", "Months": "{:.0f}", "Solver fails": "{:.0f}"},
+                                   na_rep="—"), width="stretch")
+    _f = go.Figure()
+    _bc = (1 + _res[VARIANTS[0]]["bench"]).cumprod()
+    _f.add_trace(go.Scatter(x=_bc.index, y=_bc.values, name="Cap-weighted coverage", mode="lines",
+                            line=dict(color=INK_2, width=2, dash="dash")))
+    for k, col in zip(VARIANTS, ("#9ec5f4", "#5598e7", BLUE)):
+        _c = (1 + _res[k]["port"]).cumprod()
+        _f.add_trace(go.Scatter(x=_c.index, y=_c.values, name=k, mode="lines",
+                                line=dict(color=col, width=3 if k == VARIANTS[-1] else 2)))
+    _f.update_yaxes(type="log", title="Growth of $1 (log)")
+    st.plotly_chart(style(_f, 360), width="stretch")
+    _full, _nopath, _direct = (_rows[VARIANTS[2]], _rows[VARIANTS[1]], _rows[VARIANTS[0]])
+    st.caption(
+        f"Read the two gaps as in step 5. *Destination held directly → pass 2 without the path edge* "
+        f"(IR {_direct['information_ratio']:.2f} → {_nopath['information_ratio']:.2f}) is the turnover budget "
+        f"on its own; *without → with the path edge* ({_nopath['information_ratio']:.2f} → "
+        f"**{_full['information_ratio']:.2f}**) is what the path edge adds inside the optimizer at the same "
+        f"budget. Active share and gap say how much the risk penalty lets the book move: a small active "
+        f"share means the three books barely differ and the knobs above, not the edges, are what to look at. "
+        f"Gross of costs; turnover is one-way.")
 
 # ── Latest cross-section + handoff ───────────────────────────────────────────
 st.markdown("#### Latest cross-section")
